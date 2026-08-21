@@ -1,0 +1,43 @@
+# Dependencies and build output
+node_modules/
+.npm-cache/
+.playwright-browsers/
+.next/
+out/
+build/
+coverage/
+playwright-report/
+test-results/
+staging-e2e-report/
+
+# Local tooling downloaded for this workspace
+.tools/
+
+# Environment files (examples are intentionally tracked)
+.env
+.env.*
+!.env.example
+
+# Local databases and uploads
+*.sqlite
+*.sqlite3
+uploads/
+
+# Editors, agents, and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts

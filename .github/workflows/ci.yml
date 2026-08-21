@@ -1,0 +1,23 @@
+# 実装仕様書 12章のCI（雛形）。テスト・E2E・環境検証の追加は後続フェーズで行う。
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format
+      - run: npm test
+      - run: npm run build
