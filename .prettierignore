@@ -12,3 +12,4 @@ test-results/
 # 仕様書は正本のため整形対象外にする（実装仕様書・マルチエージェント開発要件定義書）
 要件定義書.md
 Health_Web_App_マルチエージェント開発要件定義書.md
+Health_Web_App_要件定義書.md
