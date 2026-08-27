@@ -12,7 +12,7 @@ import "server-only";
  * このモジュールはリクエストの形だけを検査し、認証には触れない。
  */
 
-import { resolveAppOrigin } from "@/lib/app-origin";
+import { getTrustedAppOrigin } from "@/lib/app-origin";
 
 import { jsonRequired, invalidRequest, payloadTooLarge, sameOriginRequired } from "./errors";
 
@@ -22,13 +22,21 @@ export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 /**
  * same-origin 検証。
  *
+ * - 比較対象のオリジンは `NEXT_PUBLIC_APP_URL`（実装仕様書 13.1節）**のみ**から採る。
+ *   未設定なら「何と比べるべきか分からない」ため常に拒否する＝フェイルクローズ。
+ *   以前は `X-Forwarded-Host` / `X-Forwarded-Proto` へフォールバックしていたが、
+ *   これらは詐称されうるため、攻撃者が `Origin` と揃えるだけで検査を素通りできた。
  * - `Origin` があればアプリのオリジンと完全一致を要求する。
  * - `Origin` が無い場合（同一オリジンのGET/HEADナビゲーションではブラウザが
  *   送らない）は `Sec-Fetch-Site: same-origin` を要求する。
  * - どちらも無いリクエスト（curl等）は拒否する＝フェイルクローズ。
  */
 export function isSameOriginRequest(request: Request): boolean {
-  const expectedOrigin = resolveAppOrigin(request);
+  const expectedOrigin = getTrustedAppOrigin();
+  if (expectedOrigin === null) {
+    return false;
+  }
+
   const origin = request.headers.get("origin");
 
   if (origin !== null) {

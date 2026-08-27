@@ -1,0 +1,27 @@
+<!--
+  パスワード再設定テンプレート（実装仕様書 5.1節）。
+
+  着地先は `/auth/confirm`（`type=recovery`）。`/auth/confirm` は recovery を
+  常に `/auth/update-password` へ送るため、ここで `next` を作り分ける必要はない。
+
+  `{{ .RedirectTo }}` は `sendPasswordResetAction` が渡す
+  `.../auth/confirm?next=/auth/update-password`。`?next=` を含む前提で
+  `&token_hash=` を連結している（confirmation.html と同じ不変条件）。
+-->
+<h2>パスワードの再設定</h2>
+
+<p>
+  パスワード再設定のリクエストを受け付けました。以下のリンクから新しいパスワードを設定してください。
+</p>
+
+<p>
+  <a href="{{ .RedirectTo }}&token_hash={{ .TokenHash }}&type=recovery"
+    >新しいパスワードを設定する</a
+  >
+</p>
+
+<p>
+  このリンクは一定時間で失効し、一度使うと再利用できません。失効した場合は、パスワード再設定をもう一度リクエストしてください。
+</p>
+
+<p>心当たりがない場合は、このメールを破棄してください。パスワードは変更されません。</p>

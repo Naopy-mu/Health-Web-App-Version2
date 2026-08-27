@@ -13,6 +13,7 @@ import {
   SignInForm,
   SignUpForm,
 } from "@/features/auth/components";
+import { authErrorMessage } from "@/features/auth/constants";
 import { sanitizeNextPath } from "@/features/auth/redirect";
 import { isDemoModeEnabled, isSupabaseConfigured } from "@/lib/supabase/config";
 
@@ -29,12 +30,21 @@ export default async function AuthPage({ searchParams }: { searchParams: SearchP
   const params = await searchParams;
   // 実装仕様書 5.1節: 受け取った `next` は必ず検証し、不正なら /auth/session へ丸める。
   const next = sanitizeNextPath(firstValue(params.next));
+  // `/auth/callback`・`/auth/confirm`・プロキシが `?error=<コード>` で戻してくる。
+  // 既知のコードのみを文言へ変換し、未知の値は無視する（クエリの内容は表示しない）。
+  const errorMessage = authErrorMessage(firstValue(params.error));
   const accountServiceAvailable = isSupabaseConfigured();
   const demoAvailable = isDemoModeEnabled();
 
   return (
     <main className={styles.page} id="main-content">
       <h1>ログイン</h1>
+
+      {errorMessage ? (
+        <p className={styles.banner} role="alert" aria-live="assertive">
+          {errorMessage}
+        </p>
+      ) : null}
 
       {accountServiceAvailable ? (
         <>

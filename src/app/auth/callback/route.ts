@@ -1,5 +1,12 @@
 /**
- * `GET /auth/callback` — OAuth / Magic Link のコード交換（実装仕様書 5.1節 / 7章）。
+ * `GET /auth/callback` — OAuth / Magic Link のコード交換（実装仕様書 4章の画面表 / 5.1節 / 7章）。
+ *
+ * > OAuth／Magic Link のコールバックは `/auth/callback` で処理する。
+ *
+ * Magic Link のメールは既定の `{{ .ConfirmationURL }}` を使うため
+ * （`supabase/templates/magic_link.html`）、Supabase の `/auth/v1/verify` を
+ * 経由して `?code=` 付きでここへ戻る。`token_hash` 方式のメール確認は
+ * `/auth/confirm` の担当で、この経路には来ない。
  *
  * PKCEのコードをセッションへ交換し、検証済みの `next` へ送る。
  * `next` は `sanitizeNextPath` を通すため、`//evil.example` のような値は
@@ -8,14 +15,21 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
+import type { AuthErrorCode } from "@/features/auth/constants";
 import { sanitizeNextPath } from "@/features/auth/redirect";
 import { resolveAppOrigin } from "@/lib/app-origin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 import { NO_STORE_HEADERS } from "@/server/api/errors";
 
-/** 失敗時にログイン画面で出し分けるための理由コード（値そのものは載せない）。 */
-type AuthCallbackError = "service_unavailable" | "missing_code" | "exchange_failed";
+/**
+ * 失敗時にログイン画面で出し分けるための理由コード（値そのものは載せない）。
+ * ログイン画面の文言表（`AUTH_ERROR_MESSAGES`）と型で結び付けてある。
+ */
+type AuthCallbackError = Extract<
+  AuthErrorCode,
+  "service_unavailable" | "missing_code" | "exchange_failed"
+>;
 
 function redirectToSignIn(origin: string, reason: AuthCallbackError): NextResponse {
   const url = new URL("/auth", origin);

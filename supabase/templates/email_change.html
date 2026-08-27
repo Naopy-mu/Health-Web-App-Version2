@@ -1,0 +1,23 @@
+<!--
+  メールアドレス変更テンプレート（実装仕様書 5.1節）。
+
+  `double_confirm_changes = true` のため、変更前・変更後の両アドレスへ送られる。
+  着地先は confirmation / recovery と同じ `/auth/confirm`（`type=email_change`）。
+
+  メールアドレス変更のUIは後続フェーズ（`emailRedirectTo` を渡す呼び出し元がまだ無い）。
+  そのため `{{ .RedirectTo }}` ではなく `{{ .SiteURL }}` からパスを組み立て、
+  `next` を持たない場合でも `/auth/confirm` 側の既定（`/auth/session`）へ着地させる。
+-->
+<h2>メールアドレスの変更</h2>
+
+<p>メールアドレスの変更を受け付けました。以下のリンクを開くと変更が確定します。</p>
+
+<p>
+  <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email_change"
+    >メールアドレスの変更を確定する</a
+  >
+</p>
+
+<p>このリンクは一定時間で失効し、一度使うと再利用できません。</p>
+
+<p>心当たりがない場合は、このメールを破棄してください。メールアドレスは変更されません。</p>

@@ -9,6 +9,8 @@
  * 一点だけを保証する関数にしてある。
  */
 
+import type { AuthErrorCode } from "./constants";
+
 /** 実装仕様書 4章: ログイン後の着地点。 */
 export const DEFAULT_AUTH_REDIRECT_PATH = "/auth/session";
 
@@ -92,5 +94,17 @@ export function sanitizeNextPath(value: unknown): string {
  */
 export function buildSignInPath(next: unknown): string {
   const params = new URLSearchParams({ next: sanitizeNextPath(next) });
+  return `${SIGN_IN_PATH}?${params.toString()}`;
+}
+
+/**
+ * `/auth?error=<コード>` を組み立てる（認証フローが失敗したときの戻り先）。
+ *
+ * `next` は載せない。利用者状態が `active` でない場合のように、
+ * そのまま元のルートへ戻しても同じ判定で弾かれる（＝往復するだけの）
+ * 経路で使うため（実装仕様書 3.3節 / 5.1節）。
+ */
+export function buildSignInPathWithError(error: AuthErrorCode): string {
+  const params = new URLSearchParams({ error });
   return `${SIGN_IN_PATH}?${params.toString()}`;
 }

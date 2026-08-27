@@ -25,8 +25,10 @@ enabled = false
 enabled = true
 port = 54323
 
-# ローカルのメール受信箱（確認メール・Magic Link の確認用）。
-[inbucket]
+# ローカルのメール受信箱（確認メール・Magic Link・パスワード再設定の実地確認用）。
+# 受信箱は http://localhost:54324 で開く。検証手順は docs/known-issues.md P2-5。
+# Supabase CLI 2.x で `[inbucket]` から `[local_smtp]` へ改称された。
+[local_smtp]
 enabled = true
 port = 54324
 
@@ -38,9 +40,14 @@ file_size_limit = "10MiB"
 [auth]
 enabled = true
 site_url = "http://localhost:3000"
+# 実装仕様書 4章の画面表: `/auth/callback` は OAuth / Magic Link のコード交換、
+# `/auth/confirm` はメール確認。どちらも `?next=<検証済みパス>` を伴うため、
+# クエリ付きの形も許可リストへ入れる（`?**` が無いと弾かれる構成がある）。
 additional_redirect_urls = [
   "http://localhost:3000/auth/callback",
+  "http://localhost:3000/auth/callback?**",
   "http://localhost:3000/auth/confirm",
+  "http://localhost:3000/auth/confirm?**",
 ]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
@@ -57,7 +64,46 @@ enable_confirmations = true
 secure_password_change = true
 max_frequency = "1m"
 otp_length = 6
+# メールリンクの有効期限（秒）。期限切れリンクは `/auth/confirm` が
+# `verification_failed` としてログイン画面へ戻す。
 otp_expiry = 3600
+
+# ---------------------------------------------------------------------------
+# メールテンプレート（実装仕様書 4章の画面表 / 5.1節）
+#
+# > メール確認は `/auth/confirm`、OAuth／Magic Link のコールバックは
+# > `/auth/callback` で処理する。
+#
+# この2つは検証方式が違うため、テンプレートも作り分ける。
+#   - `/auth/confirm`  : `token_hash` + `type` を `verifyOtp()` で検証する。
+#                        → テンプレートを `{{ .TokenHash }}` 形式にする必要がある
+#                          （既定の `{{ .ConfirmationURL }}` は `?code=` を返すため不可）。
+#   - `/auth/callback` : PKCE の `code` を `exchangeCodeForSession()` で交換する。
+#                        → 既定の `{{ .ConfirmationURL }}` のままにする。
+#
+# 本番 Supabase では config.toml が適用されないため、ダッシュボードの
+# Authentication → Emails で同じ内容を設定する（手順は docs/known-issues.md P2-5）。
+# ---------------------------------------------------------------------------
+
+# サインアップ確認 → /auth/confirm（token_hash + type=signup）
+[auth.email.template.confirmation]
+subject = "【Health Web App】メールアドレスの確認"
+content_path = "./supabase/templates/confirmation.html"
+
+# パスワード再設定 → /auth/confirm（token_hash + type=recovery → /auth/update-password）
+[auth.email.template.recovery]
+subject = "【Health Web App】パスワードの再設定"
+content_path = "./supabase/templates/recovery.html"
+
+# Magic Link → /auth/callback（既定の ConfirmationURL のまま。code 交換）
+[auth.email.template.magic_link]
+subject = "【Health Web App】ログイン用リンク"
+content_path = "./supabase/templates/magic_link.html"
+
+# メールアドレス変更 → /auth/confirm（token_hash + type=email_change）
+[auth.email.template.email_change]
+subject = "【Health Web App】メールアドレスの変更"
+content_path = "./supabase/templates/email_change.html"
 
 # 実装仕様書 5.1節: Googleログインは認証に必要な最小スコープのみを要求し、
 # Google Calendar の権限同意とは完全に分離する（Calendar 連携は別フローで扱う）。

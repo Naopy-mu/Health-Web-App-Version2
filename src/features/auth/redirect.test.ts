@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSignInPath,
+  buildSignInPathWithError,
   DEFAULT_AUTH_REDIRECT_PATH,
   isSafeNextPath,
   sanitizeNextPath,
@@ -86,6 +87,82 @@ describe("sanitizeNextPath（実装仕様書 5.1節 オープンリダイレク�
     }
   });
 
+  /**
+   * Codexレビュー指摘7（回帰防止）。エンコードを重ねた値でオープンリダイレクトへ
+   * 化けないことを明示的に固定する。
+   *
+   * `sanitizeNextPath` の保証は「元の値」と「1段デコードした値」の両方が
+   * アプリ内パスの形であること。ブラウザは `Location` のパスを再デコードして
+   * 解決し直さないため、実際に危険なのはこの2段階までで、
+   * 二重以上にエンコードされた値は**単なるアプリ内パス**として扱われる
+   * （`/%252f%252fevil.example` は app.example 上のパスであって外部ではない）。
+   */
+  it("1段デコードで `//`・バックスラッシュへ化ける値を丸める", () => {
+    for (const value of [
+      "/%2f%2fevil.example",
+      "/%2F%2Fevil.example",
+      "/%5C%5Cevil.example",
+      "/%5c/evil.example",
+    ]) {
+      expect(sanitizeNextPath(value), value).toBe(DEFAULT_AUTH_REDIRECT_PATH);
+    }
+  });
+
+  it("二重・三重エンコードされた値は外部オリジンへ解決しない", () => {
+    for (const value of [
+      // 二重エンコード（`%252f` はデコード1段で `%2f`、2段でようやく `/`）。
+      "/%252f%252fevil.example",
+      "/%252F%252Fevil.example",
+      "/%255C%255Cevil.example",
+      // 三重エンコード。
+      "/%25252f%25252fevil.example",
+      "/%25255c%25255cevil.example",
+    ]) {
+      const sanitized = sanitizeNextPath(value);
+
+      // 元の値と1段デコード後の両方が、アプリ内パスとして解決する。
+      expect(new URL(sanitized, "https://app.example").origin, value).toBe("https://app.example");
+      expect(
+        new URL(decodeURIComponent(sanitized), "https://app.example").origin,
+        `${value}（1段デコード）`,
+      ).toBe("https://app.example");
+      expect(sanitized.startsWith("//"), value).toBe(false);
+    }
+  });
+
+  it("多重エンコードされたスキーム・制御文字も外部へ出さない", () => {
+    for (const value of [
+      "/%2568ttps://evil.example",
+      "/%256a%2561vascript:alert(1)",
+      "/%2500",
+      "/%25252e%25252e%25252fevil.example",
+    ]) {
+      const sanitized = sanitizeNextPath(value);
+      expect(sanitized.startsWith("/"), value).toBe(true);
+      expect(sanitized.startsWith("//"), value).toBe(false);
+      expect(new URL(sanitized, "https://app.example").origin, value).toBe("https://app.example");
+    }
+  });
+
+  it("エンコードされた `next` をURLへ載せて読み戻しても外部オリジンにならない", () => {
+    for (const value of [
+      "//evil.example",
+      "/%2f%2fevil.example",
+      "/%252f%252fevil.example",
+      "https://evil.example",
+    ]) {
+      // 実際の経路（`buildSignInPath` → `URLSearchParams` → 受け側で再検証）を再現する。
+      const signInPath = buildSignInPath(value);
+      const parsed = new URL(signInPath, "https://app.example");
+      const roundTripped = sanitizeNextPath(parsed.searchParams.get("next"));
+
+      expect(new URL(roundTripped, "https://app.example").origin, value).toBe(
+        "https://app.example",
+      );
+      expect(roundTripped.startsWith("//"), value).toBe(false);
+    }
+  });
+
   it("壊れたパーセントエスケープを丸める", () => {
     expect(sanitizeNextPath("/%")).toBe(DEFAULT_AUTH_REDIRECT_PATH);
     expect(sanitizeNextPath("/%zz")).toBe(DEFAULT_AUTH_REDIRECT_PATH);
@@ -128,5 +205,17 @@ describe("buildSignInPath", () => {
   it("組み立てたURLを解決しても外部オリジンにならない", () => {
     const resolved = new URL(buildSignInPath("//evil.example"), "https://app.example");
     expect(resolved.origin).toBe("https://app.example");
+  });
+});
+
+describe("buildSignInPathWithError（実装仕様書 3.3節 / 5.1節）", () => {
+  it("理由コードだけを載せ、next は載せない", () => {
+    expect(buildSignInPathWithError("account_inactive")).toBe("/auth?error=account_inactive");
+  });
+
+  it("組み立てたURLを解決しても外部オリジンにならない", () => {
+    const resolved = new URL(buildSignInPathWithError("account_inactive"), "https://app.example");
+    expect(resolved.origin).toBe("https://app.example");
+    expect(resolved.pathname).toBe("/auth");
   });
 });

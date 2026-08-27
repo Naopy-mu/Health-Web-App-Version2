@@ -1,0 +1,28 @@
+<!--
+  サインアップのメール確認テンプレート（実装仕様書 4章の画面表 / 5.1節）。
+
+  > メール確認は `/auth/confirm`、OAuth／Magic Link のコールバックは
+  > `/auth/callback` で処理する。
+
+  `/auth/confirm` は `token_hash` + `type` を `verifyOtp()` で検証する実装
+  （`src/app/auth/confirm/route.ts`）なので、既定の `{{ .ConfirmationURL }}`
+  （`?code=` を返す PKCE 用リンク）ではなく `{{ .TokenHash }}` 形式のリンクを組み立てる。
+
+  リンクの土台に使う `{{ .RedirectTo }}` は Server Action が渡す `emailRedirectTo`
+  （`src/features/auth/actions.ts` の `buildCallbackUrl`）で、
+  **必ず `?next=<検証済みパス>` を含む**。この不変条件が崩れると `&token_hash=`
+  の連結が壊れるため、`buildCallbackUrl` から `next` の付与を外さないこと。
+-->
+<h2>メールアドレスの確認</h2>
+
+<p>Health Web App への登録ありがとうございます。以下のリンクを開くと確認が完了します。</p>
+
+<p>
+  <a href="{{ .RedirectTo }}&token_hash={{ .TokenHash }}&type=signup">メールアドレスを確認する</a>
+</p>
+
+<p>
+  このリンクは一定時間で失効し、一度使うと再利用できません。失効した場合は、もう一度サインアップからやり直してください。
+</p>
+
+<p>心当たりがない場合は、このメールを破棄してください。</p>

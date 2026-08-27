@@ -1,7 +1,9 @@
 /**
  * `DELETE /api/account/data` — 健康データのみ削除（実装仕様書 5.1節 / 7章）。
  *
- * Phase 2 では**共通境界と認証・再認証チェックまで**を実装した骨格を置く。
+ * Phase 2 では**共通境界・ボディ検証・認証・再認証チェックまで**を実装した骨格を置く。
+ * ボディは `parseAccountDeleteRequest()` の `.strict()` 検証（所有者IDの持ち込み拒否を含む）
+ * を通過した場合にのみ 501 へ到達する（実装仕様書 3.2節 / 9.2節）。
  * 削除対象の機能テーブルがまだ存在しないため、本体は 501 を返す。
  *
  * TODO(Phase 3以降、機能テーブルが揃ってから本実装する): 実装仕様書 5.1節の順序で
@@ -18,6 +20,7 @@
 
 import type { NextRequest } from "next/server";
 
+import { parseAccountDeleteRequest } from "@/server/account/delete-request";
 import { notImplemented } from "@/server/api/errors";
 import { guardMutationRequest, readJsonBody } from "@/server/api/guards";
 import { requireRecentReauthentication } from "@/server/api/reauthentication";
@@ -29,10 +32,17 @@ export async function DELETE(request: NextRequest): Promise<Response> {
     return guard.response;
   }
 
-  // 64KiB上限の実バイト数検査（実装仕様書 7章）。ボディの所有者IDは読まない。
+  // 64KiB上限の実バイト数検査（実装仕様書 7章）。
   const body = await readJsonBody(request);
   if (!body.ok) {
     return body.response;
+  }
+
+  // 実装仕様書 3.2節 / 9.2節: 所有者IDの持ち込みを拒否し、`.strict()` を通す。
+  // 本体が 501 の段階でも、検証を素通りして 501 へ到達させない。
+  const parsedBody = parseAccountDeleteRequest(body.value);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
 
   const auth = await requireActiveUser();

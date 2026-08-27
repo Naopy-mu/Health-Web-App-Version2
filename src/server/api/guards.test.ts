@@ -72,11 +72,76 @@ describe("same-origin 検証（実装仕様書 7章）", () => {
     expect(isSameOriginRequest(makeRequest({}))).toBe(false);
   });
 
-  it("NEXT_PUBLIC_APP_URL 未設定ならリクエストURL自身のオリジンと比較する", () => {
+  it("X-Forwarded-Host / X-Forwarded-Proto では比較対象を書き換えられない", () => {
+    // Codexレビュー指摘3の回帰テスト。以前は NEXT_PUBLIC_APP_URL 未設定時に
+    // これらのヘッダーを「アプリのオリジン」として採用していたため、
+    // Origin とヘッダーを揃えるだけで same-origin 検査を素通りできた。
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", APP_ORIGIN);
+    expect(
+      isSameOriginRequest(
+        makeRequest({
+          headers: {
+            origin: "https://evil.example",
+            "x-forwarded-host": "evil.example",
+            "x-forwarded-proto": "https",
+          },
+        }),
+      ),
+    ).toBe(false);
+
+    // 正しい Origin はヘッダーが詐称されていても通る（比較対象が固定のため）。
+    expect(
+      isSameOriginRequest(
+        makeRequest({
+          headers: {
+            origin: APP_ORIGIN,
+            "x-forwarded-host": "evil.example",
+            "x-forwarded-proto": "http",
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("NEXT_PUBLIC_APP_URL 未設定なら検査自体を失敗させる（フェイルクローズ）", () => {
     vi.stubEnv("NEXT_PUBLIC_APP_URL", "");
-    expect(isSameOriginRequest(makeRequest({ headers: { origin: APP_ORIGIN } }))).toBe(true);
-    expect(isSameOriginRequest(makeRequest({ headers: { origin: "https://evil.example" } }))).toBe(
+
+    // 比較対象が決まらない以上、どのリクエストも通してはならない。
+    expect(isSameOriginRequest(makeRequest({ headers: { origin: APP_ORIGIN } }))).toBe(false);
+    expect(isSameOriginRequest(makeRequest({ headers: { "sec-fetch-site": "same-origin" } }))).toBe(
       false,
+    );
+    expect(
+      isSameOriginRequest(
+        makeRequest({
+          headers: {
+            origin: "https://evil.example",
+            "x-forwarded-host": "evil.example",
+            "x-forwarded-proto": "https",
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("NEXT_PUBLIC_APP_URL 未設定時、状態変更は 403 SAME_ORIGIN_REQUIRED になる", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "");
+    const result = guardMutationRequest(
+      makeRequest({
+        headers: {
+          origin: APP_ORIGIN,
+          "content-type": "application/json",
+          "x-forwarded-host": "app.example",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.response.status).toBe(403);
+    expect((await readErrorBody(result.response)).error.code).toBe(
+      API_ERROR_CODES.SAME_ORIGIN_REQUIRED,
     );
   });
 

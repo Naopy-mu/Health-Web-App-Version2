@@ -16,7 +16,7 @@ import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { buildSignInPath } from "@/features/auth/redirect";
+import { buildSignInPath, buildSignInPathWithError } from "@/features/auth/redirect";
 
 import { getSupabaseClientConfig } from "./config";
 
@@ -66,6 +66,12 @@ type SupabaseClientFactory = (request: NextRequest, response: NextResponse) => A
 /** ミドルウェアが必要とする最小の認証インターフェース。 */
 type AuthenticationProbe = {
   getUser: () => Promise<{ data: { user: { id: string } | null } }>;
+  /**
+   * 実装仕様書 3.3節「セッションと**利用者状態**を確認する」。
+   * Phase 1 の `public.is_active_user()`（実装仕様書 6.5節）を呼び、
+   * `users.status` が `active` のときだけ `true` を返す。
+   */
+  isActiveUser: () => Promise<boolean>;
 };
 
 const defaultClientFactory: SupabaseClientFactory = (request, response) => {
@@ -90,15 +96,33 @@ const defaultClientFactory: SupabaseClientFactory = (request, response) => {
     },
   });
 
-  return { getUser: () => client.auth.getUser() };
+  return {
+    getUser: () => client.auth.getUser(),
+    // RPC は `authenticated` にのみ EXECUTE が付いている（実装仕様書 6.5節）。
+    // 呼び出し元のJWTで実行するので、判定はDB側の単一の真実に委ねられる。
+    isActiveUser: async () => {
+      const { data, error } = await client.rpc("is_active_user");
+      return !error && data === true;
+    },
+  };
 };
 
 /**
- * セッションCookieを更新しつつ、保護ルートへの未認証アクセスをログインへ丸める。
+ * セッションCookieを更新しつつ、保護ルートへのアクセスを
+ * **セッションと利用者状態の両方**で絞り込む（実装仕様書 3.3節）。
  *
  * - Supabase未設定時（実装仕様書 3.3節）は保護ルートを `/auth` へ送る。
  *   画面側でデモモードへの導線を示す。
- * - 戻り先の `next` は `sanitizeNextPath` を通してから載せる（実装仕様書 5.1節）。
+ * - 未認証は `/auth?next=<元のパス>` へ。戻り先の `next` は `sanitizeNextPath`
+ *   を通してから載せる（実装仕様書 5.1節）。
+ * - 認証済みでも `users.status` が `active` でない（`suspended` /
+ *   `deletion_pending` / `health_data_erasure_pending`）場合は
+ *   `/auth?error=account_inactive` へ送る（実装仕様書 5.1節）。
+ *   有効なJWTを持っていても保護ルートへは入れない。`next` は載せない
+ *   （戻しても同じ判定で弾かれ、往復するだけになるため）。
+ * - 状態を判定できない場合（RPC失敗・ネットワーク障害）は
+ *   非activeとして扱う＝フェイルクローズ。API層の `requireActiveUser()` と
+ *   同じ倒し方に揃えてある。
  */
 export async function updateSupabaseSession(
   request: NextRequest,
@@ -133,6 +157,20 @@ export async function updateSupabaseSession(
 
   if (protectedPath && !userId) {
     return NextResponse.redirect(new URL(buildSignInPath(buildNextTarget(url)), url));
+  }
+
+  // 実装仕様書 3.3節: プロキシは「セッション」だけでなく「利用者状態」も確認する。
+  if (protectedPath) {
+    let active = false;
+    try {
+      active = await supabase.isActiveUser();
+    } catch {
+      active = false;
+    }
+
+    if (!active) {
+      return NextResponse.redirect(new URL(buildSignInPathWithError("account_inactive"), url));
+    }
   }
 
   return response;

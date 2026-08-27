@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { NextRequest } from "next/server";
+import { NextRequest, type NextResponse } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { isProtectedPath, protectedRoutePrefixes, updateSupabaseSession } from "./proxy";
@@ -21,11 +21,31 @@ const configureSupabase = () => {
 
 const makeRequest = (path: string) => new NextRequest(new URL(path, APP_ORIGIN));
 
-const anonymousClient = () => ({ getUser: async () => ({ data: { user: null } }) });
+const USER_ID = "6c4f8a1e-6c7b-4c4a-9f6f-6d9e1f1b2c3d";
+
+const anonymousClient = () => ({
+  getUser: async () => ({ data: { user: null } }),
+  isActiveUser: async () => false,
+});
+
+/** 認証済み＋`users.status = active`（`is_active_user()` が true）。 */
 const signedInClient =
-  (id = "6c4f8a1e-6c7b-4c4a-9f6f-6d9e1f1b2c3d") =>
+  (id = USER_ID) =>
   () => ({
     getUser: async () => ({ data: { user: { id } } }),
+    isActiveUser: async () => true,
+  });
+
+/**
+ * 有効なJWTを持つが `users.status` が active ではない利用者
+ * （`suspended` / `deletion_pending` / `health_data_erasure_pending`）。
+ * 実装仕様書 5.1節・3.3節。
+ */
+const inactiveClient =
+  (isActiveUser: () => Promise<boolean> = async () => false) =>
+  () => ({
+    getUser: async () => ({ data: { user: { id: USER_ID } } }),
+    isActiveUser,
   });
 
 afterEach(() => {
@@ -122,7 +142,7 @@ describe("updateSupabaseSession（未認証時のログインへのリダイレ�
     }
   });
 
-  it("認証済みなら保護ルートを通す", async () => {
+  it("認証済みかつ active なら保護ルートを通す", async () => {
     configureSupabase();
     const response = await updateSupabaseSession(makeRequest("/measurements"), {
       createClient: signedInClient(),
@@ -150,6 +170,7 @@ describe("updateSupabaseSession（未認証時のログインへのリダイレ�
         getUser: async () => {
           throw new Error("network unreachable");
         },
+        isActiveUser: async () => true,
       }),
     });
 
@@ -182,5 +203,114 @@ describe("updateSupabaseSession（未認証時のログインへのリダイレ�
     expect(next.startsWith("/")).toBe(true);
     expect(next.startsWith("//")).toBe(false);
     expect(new URL(next, APP_ORIGIN).origin).toBe(APP_ORIGIN);
+  });
+});
+
+/**
+ * 実装仕様書 3.3節（プロキシは「セッションと利用者状態」を確認する）
+ * および 5.1節:
+ * > 利用者状態（`users.status`）が `active` 以外（`suspended` /
+ * > `health_data_erasure_pending` / `deletion_pending`）の場合、
+ * > 有効なJWTが残っていても全APIが HTTP 403（`ACCOUNT_INACTIVE`）を返す。
+ *
+ * Codexレビュー指摘2の回帰テスト。以前のプロキシは `getUser()` の有無しか
+ * 見ておらず、非active利用者が有効なJWTを持っていれば保護ルートを通過できた。
+ */
+describe("updateSupabaseSession（利用者状態の確認・実装仕様書 3.3節）", () => {
+  const locationOf = (response: NextResponse) =>
+    new URL(response.headers.get("location") ?? "", APP_ORIGIN);
+
+  it("非active（suspended / deletion_pending / health_data_erasure_pending）を保護ルートから締め出す", async () => {
+    configureSupabase();
+
+    const response = await updateSupabaseSession(makeRequest("/measurements"), {
+      createClient: inactiveClient(),
+    });
+
+    expect(response.status).toBe(307);
+    const location = locationOf(response);
+    expect(location.pathname).toBe("/auth");
+    expect(location.searchParams.get("error")).toBe("account_inactive");
+    // 戻しても同じ判定で弾かれるため、`next` は載せない。
+    expect(location.searchParams.get("next")).toBeNull();
+  });
+
+  it("すべての保護ルートprefixで非activeを締め出す", async () => {
+    configureSupabase();
+
+    for (const prefix of protectedRoutePrefixes) {
+      const response = await updateSupabaseSession(makeRequest(prefix), {
+        createClient: inactiveClient(),
+      });
+
+      expect(response.status, prefix).toBe(307);
+      const location = locationOf(response);
+      expect(location.pathname, prefix).toBe("/auth");
+      expect(location.searchParams.get("error"), prefix).toBe("account_inactive");
+    }
+  });
+
+  it("利用者状態を判定できない場合も締め出す（フェイルクローズ）", async () => {
+    configureSupabase();
+
+    const rpcFailures = [
+      // RPC がエラーを返した（デフォルトのファクトリは false へ落とす）。
+      async () => false,
+      // RPC 呼び出し自体が例外になった（ネットワーク障害等）。
+      async () => {
+        throw new Error("network unreachable");
+      },
+    ];
+
+    for (const isActiveUser of rpcFailures) {
+      const response = await updateSupabaseSession(makeRequest("/records"), {
+        createClient: inactiveClient(isActiveUser),
+      });
+
+      expect(response.status).toBe(307);
+      expect(locationOf(response).searchParams.get("error")).toBe("account_inactive");
+    }
+  });
+
+  it("公開ルートでは利用者状態を問わない", async () => {
+    configureSupabase();
+
+    for (const path of ["/", "/demo", "/auth", "/auth/callback", "/auth/confirm", "/offline"]) {
+      const response = await updateSupabaseSession(makeRequest(path), {
+        createClient: inactiveClient(),
+      });
+      expect(response.status, path).toBe(200);
+    }
+  });
+
+  it("未認証のときは利用者状態のRPCを呼ばない", async () => {
+    configureSupabase();
+    const isActiveUser = vi.fn(async () => true);
+
+    const response = await updateSupabaseSession(makeRequest("/records"), {
+      createClient: () => ({
+        getUser: async () => ({ data: { user: null } }),
+        isActiveUser,
+      }),
+    });
+
+    expect(response.status).toBe(307);
+    expect(new URL(response.headers.get("location") ?? "").pathname).toBe("/auth");
+    expect(isActiveUser).not.toHaveBeenCalled();
+  });
+
+  it("active なら利用者状態のRPCを1回だけ呼んで通す", async () => {
+    configureSupabase();
+    const isActiveUser = vi.fn(async () => true);
+
+    const response = await updateSupabaseSession(makeRequest("/settings/account"), {
+      createClient: () => ({
+        getUser: async () => ({ data: { user: { id: USER_ID } } }),
+        isActiveUser,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(isActiveUser).toHaveBeenCalledTimes(1);
   });
 });
