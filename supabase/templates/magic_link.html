@@ -9,7 +9,14 @@
   `emailRedirectTo`（= `/auth/callback?next=<検証済みパス>`）へ `?code=` を付けて戻す。
 
   ここを `{{ .TokenHash }}` 形式へ変えると `/auth/callback` の `code` が
-  無くなり `missing_code` で失敗する。変更する場合は着地先も併せて見直すこと。
+  無くなるため、変更する場合は着地先も併せて見直すこと。
+
+  なお **このテンプレートが使われるのは宛先が登録済み かつ メール確認済みのときだけ**。
+  未登録・未確認の宛先には GoTrue が `confirmation`（サインアップ確認）テンプレートを
+  選び、`{{ .RedirectTo }}`（= `/auth/callback?next=…`）へ `token_hash` 形式の
+  リンクが送られる。そのため `/auth/callback` は `token_hash` 形式も受け付ける
+  （`src/app/auth/callback/route.ts` / `src/features/auth/email-otp.ts`）。
+  実地検証の記録は docs/known-issues.md P2-5。
 -->
 <h2>ログイン用リンク</h2>
 

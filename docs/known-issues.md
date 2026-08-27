@@ -31,16 +31,16 @@
 Phase 2 のスコープは「認証・アカウント基盤」であり、以下は**対象となるデータ・機能が
 まだ存在しない**ため骨格までとした。該当ファイルには `TODO(Phase 3以降)` を記載してある。
 
-| #    | 項目                                                | 現状                                                                                                                                                                    | 着手の前提                                                               | 該当節                       |
-| ---- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------- |
-| P2-1 | 健康データ削除の本実装                              | `DELETE /api/account/data` は same-origin・Content-Type・64KiB・認証・利用者状態・再認証まで検査し、本体は 501 を返す                                                   | 機能テーブルと削除RPC（`service_role` 限定）                             | 実装仕様書 5.1節・9.2節      |
-| P2-2 | アカウント削除の本実装                              | `DELETE /api/account` も同様に 501。Google接続revoke → Storage削除 → Auth Admin API による削除 → CASCADE → セッション破棄の順序は未実装                                 | 機能テーブル・Google連携・Storage実体                                    | 実装仕様書 5.1節・5.11節     |
-| P2-3 | データ出力の対象拡大とページング                    | `GET /api/account/export` の対象は `users` / `user_profiles` のみ。1テーブル25,000行・合計100,000行・ページサイズ500行の上限は定数のみ用意した                          | 機能テーブル                                                             | 実装仕様書 5.1節             |
-| P2-4 | プロフィール編集UIの本実装                          | `/demo` は候補提示・確認保存・JSON出力・ブラウザ内削除の骨格。`ProfileWorkspace` と 5.2節の検証は未実装                                                                 | 実装仕様書 5.2節の着手（`/onboarding` と共通化）                         | 実装仕様書 3.1節・5.2節      |
-| P2-5 | 認証フローのE2E（メールリンクの実地確認）           | 保護ルートのリダイレクト・利用者状態による締め出し・`next` の丸め・メールリンクの着地先は Vitest で検証済み。**実ブラウザでリンクを踏む往復は未検証**（下記 P2-5 詳細） | Docker + Supabase CLI（`supabase start` / Inbucket）、Playwright実行環境 | 実装仕様書 4章・5.1節・12章  |
-| P2-6 | `env:check` の実装と `NEXT_PUBLIC_APP_URL` の必須化 | Phase 0 の雛形のまま。`NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` の欠落検出は未実装（下記 P2-6 詳細）                  | 実装仕様書 13.1節の全変数の要否確定                                      | 実装仕様書 12章・13.1節・7章 |
+| #    | 項目                                                | 現状                                                                                                                                                                                                                      | 着手の前提                                             | 該当節                       |
+| ---- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------- |
+| P2-1 | 健康データ削除の本実装                              | `DELETE /api/account/data` は same-origin・Content-Type・64KiB・認証・利用者状態・再認証まで検査し、本体は 501 を返す                                                                                                     | 機能テーブルと削除RPC（`service_role` 限定）           | 実装仕様書 5.1節・9.2節      |
+| P2-2 | アカウント削除の本実装                              | `DELETE /api/account` も同様に 501。Google接続revoke → Storage削除 → Auth Admin API による削除 → CASCADE → セッション破棄の順序は未実装                                                                                   | 機能テーブル・Google連携・Storage実体                  | 実装仕様書 5.1節・5.11節     |
+| P2-3 | データ出力の対象拡大とページング                    | `GET /api/account/export` の対象は `users` / `user_profiles` のみ。1テーブル25,000行・合計100,000行・ページサイズ500行の上限は定数のみ用意した                                                                            | 機能テーブル                                           | 実装仕様書 5.1節             |
+| P2-4 | プロフィール編集UIの本実装                          | `/demo` は候補提示・確認保存・JSON出力・ブラウザ内削除の骨格。`ProfileWorkspace` と 5.2節の検証は未実装                                                                                                                   | 実装仕様書 5.2節の着手（`/onboarding` と共通化）       | 実装仕様書 3.1節・5.2節      |
+| P2-5 | 認証フローのE2E（メールリンクの実地確認）           | **実地検証済み（2026-08-27）**。ローカル Supabase + Mailpit + 実ブラウザで a〜e・f〜k の43ケースを確認。検証中に見つかった Magic Link の不具合（未登録・メール未確認の宛先で `missing_code`）は修正済み（下記 P2-5 詳細） | 完了。Playwright のシナリオ化（`e2e/`）は Phase 3 以降 | 実装仕様書 4章・5.1節・12章  |
+| P2-6 | `env:check` の実装と `NEXT_PUBLIC_APP_URL` の必須化 | Phase 0 の雛形のまま。`NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` の欠落検出は未実装（下記 P2-6 詳細）                                                                    | 実装仕様書 13.1節の全変数の要否確定                    | 実装仕様書 12章・13.1節・7章 |
 
-### P2-5 詳細: メールテンプレート設定と実ブラウザ検証
+### P2-5 詳細: メールテンプレート設定と実ブラウザ検証（実施済み）
 
 実装仕様書 4章の画面表は、メール系フローの着地先を次のように分けている。
 
@@ -83,69 +83,100 @@ Phase 2 のスコープは「認証・アカウント基盤」であり、以下
    - **Change email address**: `supabase/templates/email_change.html` の本文を貼り付ける
      （`{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email_change`）。
    - **Magic Link**: 既定の `{{ .ConfirmationURL }}` のままにする。
-     ここを `{{ .TokenHash }}` 形式に変えると `/auth/callback` が `missing_code` で失敗する。
 3. Authentication → Providers → Email で「Confirm email」を有効にする。
 4. テンプレート変更後、実アドレス宛に 3 種のメールを送って着地先を確認する（下記の検証ケース）。
 
-#### 実ブラウザでの検証ケース（未実施）
+#### 実施した検証（2026-08-27）
 
-`supabase start`（Docker 必須）で立ち上げ、ローカルのメール受信箱
-（`http://localhost:54324`。`supabase/config.toml` の `[local_smtp]`。
-Supabase CLI 2.x で `[inbucket]` から改称された）で受信メールのリンクを
-実際に踏んで、以下を確認する。
+Docker Desktop 導入後、`npx supabase@2.116.0 start` でローカル Supabase を起動し、
+`npm run dev`（`NEXT_PUBLIC_APP_URL=http://localhost:3000`）に対して
+実ブラウザ（Playwright / Chromium）で `/auth` のフォームを操作し、
+受信箱に届いたメール本文のリンクを実際に踏んで確認した。
 
-| #   | フロー            | 操作                                                                              | 期待する着地                                                                                                                                              |
-| --- | ----------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a   | サインアップ確認  | `/auth` でメール+パスワード登録 → 受信メールのリンク                              | `/auth/confirm?token_hash=…&type=signup&next=…` を経て `next`（既定 `/auth/session`）へ。セッションが確立している                                         |
-| b   | Magic Link        | `/auth` の Magic Link 送信 → 受信メールのリンク                                   | Supabase の `/auth/v1/verify` を経て `/auth/callback?next=…&code=…` → `next` へ。セッションが確立している                                                 |
-| c   | パスワード再設定  | `/auth/forgot-password` で送信 → 受信メールのリンク                               | `/auth/confirm?…&type=recovery` を経て **`/auth/update-password`** へ（`next` の指定によらず recovery は常にここ）。新パスワード設定後 `/auth/session` へ |
-| d   | `next` の持ち回り | `/measurements` へ未認証アクセス → `/auth?next=%2Fmeasurements` から a / b を実施 | 認証後 `/measurements` へ着地する                                                                                                                         |
-| e   | `next` の丸め     | `next=//evil.example` を付けて a / b を実施                                       | 外部へ出ず `/auth/session` へ着地する（実装仕様書 5.1節）                                                                                                 |
+検証環境:
 
-#### 期限切れ・再利用リンクの扱い（未実施）
+- Supabase CLI 2.116.0 / gotrue v2.196.0 / postgres 17.6.1.165
+- **ローカルの受信箱は Mailpit v1.30.2**（`http://localhost:54324`）。
+  `supabase start` の出力は `MAILPIT_URL` と `INBUCKET_URL` の両方を同じURLで返し、
+  コンテナ名は `supabase_inbucket_<project>` のままだが、中身は Mailpit へ置き換わっている。
+  受信メールの取得は Mailpit の API（`/api/v1/search?query=to:<addr>`、
+  `/api/v1/message/<id>`）を使う。Inbucket の `/api/v1/mailbox/<name>` は無い。
 
-`otp_expiry`（`supabase/config.toml` で 3600 秒）を過ぎたリンク、および一度使用済みの
-リンクは、Supabase 側で検証が失敗する。アプリ側の期待動作は以下のとおりで、
-これも実ブラウザで確認する。
+結果は **43 ケースすべて期待どおり**（うち 1 件は下記の不具合を修正してから成立）。
 
-| #   | 状況                                                            | 期待する挙動                                                                                                                            |
-| --- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| f   | 期限切れの signup / recovery リンク                             | `verifyOtp()` が失敗 → `/auth?error=verification_failed` へ。ログイン画面が「有効期限が切れているか、すでに使用されています」と表示する |
-| g   | 一度使用した signup / recovery リンクの再訪                     | 同上（`verification_failed`）。二重にセッションが発行されない                                                                           |
-| h   | 期限切れ・使用済みの Magic Link                                 | `exchangeCodeForSession()` が失敗 → `/auth?error=exchange_failed`                                                                       |
-| i   | `token_hash` / `type` を欠いた `/auth/confirm` への直接アクセス | `/auth?error=invalid_link`                                                                                                              |
-| j   | `code` を欠いた `/auth/callback` への直接アクセス               | `/auth?error=missing_code`                                                                                                              |
-| k   | 期限切れリンクから `/auth/update-password` を直接開く           | セッションが無いため `updatePasswordAction` が「再設定用リンクの有効期限が切れています」を返す                                          |
+| #   | フロー                         | 実際に踏んだリンクと着地                                                                                                                                                                                                                                                                                                     | 判定 |
+| --- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| a   | サインアップ確認               | 件名「【Health Web App】メールアドレスの確認」。`http://localhost:3000/auth/confirm?next=%2Fauth%2Fsession&token_hash=pkce_9da064d9…&type=signup` → `/auth/session` に「ログインしています。」と登録アドレスが表示される                                                                                                     | ○    |
+| b   | Magic Link（確認済み宛先）     | 件名「【Health Web App】ログイン用リンク」。`http://127.0.0.1:54321/auth/v1/verify?token=pkce_f641ecdb…&type=magiclink&redirect_to=…%2Fauth%2Fcallback%3Fnext%3D%252Fauth%252Fsession` → 303 → `/auth/callback?code=422407c3-…&next=%2Fauth%2Fsession` → 307 → `/auth/session`                                               | ○    |
+| b'  | Magic Link（未登録宛先）       | 件名は「メールアドレスの確認」。`http://localhost:3000/auth/callback?next=%2Fauth%2Fsession&token_hash=pkce_bf492e2d…&type=signup`（`code` 無し）→ `/auth/session`                                                                                                                                                           | ○ ※  |
+| b'' | Magic Link（未確認の登録済み） | 同上の形。`/auth/callback?...&token_hash=…&type=signup` → `/auth/session`                                                                                                                                                                                                                                                    | ○ ※  |
+| c   | パスワード再設定               | 件名「【Health Web App】パスワードの再設定」。`http://localhost:3000/auth/confirm?next=%2Fauth%2Fupdate-password&token_hash=pkce_924080a8…&type=recovery` → `/auth/update-password` → 新パスワード設定 → `/auth/session`。新パスワードで再ログイン成功、旧パスワードは「メールアドレスまたはパスワードが正しくありません。」 | ○    |
+| d   | `next` の持ち回り              | 未認証で `/measurements` → `/auth?next=%2Fmeasurements`。code 形式・token_hash 形式のどちらのリンクでも認証後 `/measurements` へ着地（画面自体は後続フェーズで未実装）                                                                                                                                                       | ○    |
+| e   | `next` の丸め                  | `/auth?next=%2F%2Fevil.example` から送信したリンクは、code 形式では `redirect_to=…/auth/callback?next=%2Fauth%2Fsession`、token_hash 形式では `next=/auth/session` に丸められ、着地も自オリジンの `/auth/session`。`evil.example` はリンクにも着地にも現れない                                                               | ○    |
 
-エラー文言はログイン画面（`src/app/auth/page.tsx`）が `?error=<コード>` を
-`AUTH_ERROR_MESSAGES`（`src/features/auth/constants.ts`）で変換して表示する。
-既知のコード以外は無視し、クエリの内容そのものは画面へ出さない（実装仕様書 9.2節）。
+※ b' / b'' は下記「見つかった不具合」で修正した経路。
 
-#### 実施できない理由と、現時点で確認できたところまで
+#### 期限切れ・再利用リンクの扱い（実施済み）
 
-`supabase start` は Docker を必須とするが、現在の開発環境には Docker / Podman が
-（WSL 内も含めて）存在しない。Supabase CLI 自体は `npx supabase` で取得できるため、
-**Docker 導入後は追加のコード変更なしに上記を実施できる**。
+期限切れは `supabase/config.toml` の `otp_expiry` を一時的に 60 秒へ下げ、
+`supabase stop && supabase start` で反映してから 75 秒待って踏んだ（検証後 3600 秒へ戻した）。
 
-現時点で確認済み:
+| #   | 状況                                                            | 実際の挙動                                                                                                                                                                               | 判定 |
+| --- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| f   | 期限切れの signup / recovery リンク                             | 両方とも `/auth?error=verification_failed`。「リンクを確認できませんでした。有効期限が切れているか、すでに使用されています。…」を表示                                                    | ○    |
+| g   | 一度使用した signup / recovery リンクの再訪                     | 同上（`verification_failed`）。再訪したコンテキストから `/auth/session` を開くと `/auth?next=%2Fauth%2Fsession` へ丸められ、セッションは発行されていない                                 | ○    |
+| h   | 期限切れ・使用済みの Magic Link                                 | code 形式は `/auth?error=exchange_failed`（Supabase が `#error=…&error_code=otp_expired` をフラグメントで付けるが、画面には出ない）。token_hash 形式は `/auth?error=verification_failed` | ○    |
+| i   | `token_hash` / `type` を欠いた `/auth/confirm` への直接アクセス | `/auth?error=invalid_link`。未知の `type` も同じ。存在しない `token_hash` は `verification_failed`                                                                                       | ○    |
+| j   | `code` を欠いた `/auth/callback` への直接アクセス               | `code` も `token_hash` も無ければ `/auth?error=missing_code`。`?error=access_denied&error_description=…` は `exchange_failed` になり、`error_description` の値は画面に出ない             | ○    |
+| k   | 期限切れリンクから `/auth/update-password` を直接開く           | 「再設定用リンクの有効期限が切れているか、リンクから開かれていません。」を表示し、更新フォーム自体を出さない                                                                             | ○    |
 
-- `npx supabase@2.116.0 status` が `supabase/config.toml` を解析でき、
-  追加した `[auth.email.template.*]`（`subject` / `content_path`）と
-  `additional_redirect_urls` のクエリ付きエントリを受け付ける
-  （エラーは Docker 未検出の一点のみ）。
-- 各 Server Action が渡す `emailRedirectTo` / `redirectTo` の着地先と `next` は
-  `src/features/auth/actions.test.ts` で固定済み。
-- `/auth/callback`・`/auth/confirm` の失敗時の `?error=` コードと
-  ログイン画面の文言変換は `src/features/auth/constants.ts` の型で結び付けてある。
+`/auth?error=<script>alert(1)</script>` のような未知のコードは無視され、
+クエリの内容は画面に一切出ない（実装仕様書 9.2節）ことも併せて確認した。
 
-Docker 導入後の実行手順:
+#### 見つかった不具合と修正
+
+**症状**: Magic Link を **未登録のアドレス**、または **登録済みだがメール未確認のアドレス**
+に対して送ると、リンクを踏んでも `/auth?error=missing_code` で行き止まりになり、
+ログインできない。とくに「サインアップしたが確認メールのリンクを踏んでいない」利用者は、
+Magic Link を何度送り直しても同じ結果になり、**どのメールからもログインできない**状態に陥る。
+
+**原因**: GoTrue は宛先が未登録・メール未確認のとき、`signInWithOtp()`（Magic Link）の
+要求であってもテンプレートに `magic_link` ではなく **`confirmation`（サインアップ確認）**
+を選ぶ。`confirmation.html` は `{{ .RedirectTo }}&token_hash=…&type=signup` を組み立てるが、
+この `RedirectTo` は Magic Link の Server Action が渡した `/auth/callback?next=…` である。
+結果として **`code` を持たない `token_hash` 形式のリンクが `/auth/callback` へ届く**。
+`/auth/callback` は `code` 前提だったため `missing_code` で弾いていた。
+
+上の表の「ルート ↔ 検証方式」の対応は**送信側の意図としては正しい**が、
+どちらのテンプレートが選ばれるかは宛先の状態しだいで、アプリからは制御できない。
+
+**修正**:
+
+- `src/features/auth/email-otp.ts` を新設し、`token_hash` + `type` の検証
+  （`verifyOtp()`・`type=recovery` の `/auth/update-password` 固定・`next` の丸め）を切り出した。
+- `src/app/auth/confirm/route.ts` はこの共通処理を使うように書き換えた（挙動は変えていない）。
+- `src/app/auth/callback/route.ts` は、`code` が無くても `token_hash` があれば
+  同じ検証へ回すようにした。`code` も `token_hash` も無い場合は従来どおり `missing_code`。
+- `supabase/templates/magic_link.html` のコメントに、このテンプレートが使われるのは
+  宛先が登録済みかつ確認済みのときだけであることを追記した。
+
+回帰テスト: `src/features/auth/email-otp.test.ts`、`src/app/auth/callback/route.test.ts`。
+
+**本番 Supabase でも同じ挙動になる**（GoTrue のテンプレート選択はホステッド環境でも同じ）。
+ダッシュボードで Magic Link テンプレートを既定のままにしていても、
+未確認の利用者には Confirm signup テンプレートが送られる点に注意すること。
+
+#### 再実行の手順
 
 ```bash
-npx supabase start          # 初回はイメージ取得のため時間がかかる
-npm run dev                 # NEXT_PUBLIC_APP_URL=http://localhost:3000 を設定しておく
-# http://localhost:3000/auth から a〜e を実施し、http://localhost:54324 で受信を確認する
-npx supabase stop
+npx supabase@2.116.0 start   # Docker Desktop が起動していること
+npm run dev                  # .env.local に NEXT_PUBLIC_APP_URL=http://localhost:3000 を設定
+# http://localhost:3000/auth から a〜e を実施し、http://localhost:54324（Mailpit）で受信を確認する
+npx supabase@2.116.0 stop
 ```
+
+期限切れ（f）を再現する場合のみ、`supabase/config.toml` の `otp_expiry` を一時的に
+小さくして `supabase stop && supabase start` で反映し、検証後に 3600 へ戻すこと。
 
 ### P2-6 詳細: `NEXT_PUBLIC_APP_URL` の必須化と `env:check`
 

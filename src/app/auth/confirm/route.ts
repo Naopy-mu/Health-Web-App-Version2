@@ -13,17 +13,16 @@
  * 既に送信済みのリンクや手動で `token_hash` 方式に切り替えた運用を
  * 取りこぼさないためで、既定の送信経路はここを通らない。
  *
- * `type=recovery` は `/auth/update-password` へ着地させる。`next` は
- * `sanitizeNextPath` を通し、外部オリジンへは決して送らない。
+ * 検証そのものは `@/features/auth/email-otp` に切り出してある。
+ * `/auth/callback` も同じ形のリンクを受け取りうるため（同モジュールの説明を参照）、
+ * 両方が同一の判定・同一の着地先を使う。
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { UPDATE_PASSWORD_PATH, type AuthErrorCode } from "@/features/auth/constants";
-import { sanitizeNextPath } from "@/features/auth/redirect";
-import { emailOtpTypeSchema } from "@/features/auth/schema";
+import type { AuthErrorCode } from "@/features/auth/constants";
+import { verifyEmailOtpLink } from "@/features/auth/email-otp";
 import { resolveAppOrigin } from "@/lib/app-origin";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 import { NO_STORE_HEADERS } from "@/server/api/errors";
 
@@ -43,32 +42,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const origin = resolveAppOrigin(request);
   const requestUrl = new URL(request.url);
 
-  const tokenHash = requestUrl.searchParams.get("token_hash");
-  const parsedType = emailOtpTypeSchema.safeParse(requestUrl.searchParams.get("type"));
+  const result = await verifyEmailOtpLink(requestUrl.searchParams);
 
-  if (!tokenHash || !parsedType.success) {
-    return redirectToSignIn(origin, "invalid_link");
+  switch (result.status) {
+    case "invalid":
+      return redirectToSignIn(origin, "invalid_link");
+    case "unavailable":
+      return redirectToSignIn(origin, "service_unavailable");
+    case "failed":
+      return redirectToSignIn(origin, "verification_failed");
+    case "verified":
+      // 再設定リンクは常に新しいパスワードの設定画面へ着地させる（`verifyEmailOtpLink` が決める）。
+      return NextResponse.redirect(new URL(result.next, origin), { headers: NO_STORE_HEADERS });
   }
-
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) {
-    return redirectToSignIn(origin, "service_unavailable");
-  }
-
-  const { error } = await supabase.auth.verifyOtp({
-    type: parsedType.data,
-    token_hash: tokenHash,
-  });
-
-  if (error) {
-    return redirectToSignIn(origin, "verification_failed");
-  }
-
-  // 再設定リンクは常に新しいパスワードの設定画面へ着地させる。
-  const next =
-    parsedType.data === "recovery"
-      ? UPDATE_PASSWORD_PATH
-      : sanitizeNextPath(requestUrl.searchParams.get("next"));
-
-  return NextResponse.redirect(new URL(next, origin), { headers: NO_STORE_HEADERS });
 }
