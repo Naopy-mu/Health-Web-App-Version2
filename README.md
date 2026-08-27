@@ -10,7 +10,7 @@ Phase 1（DBスキーマ基盤）まで完了。`users` / `user_profiles` と共
 
 ## 前提
 
-- Node.js 24.x / npm 11.x（実装仕様書 2章）
+- Node.js 26.x / npm 11.x（実装仕様書 2章）
 
 ## セットアップ
 
