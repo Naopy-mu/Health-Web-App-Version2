@@ -238,11 +238,24 @@ using (owner_id = (select auth.uid()) and public.is_active_user());
 
 ## 5. Storage（6.6節）
 
-- バケットは非公開の `health-images` と `food-images-private` の2つ。
-  いずれも 10MiB 上限、`image/jpeg` `image/png` `image/webp` `image/heic` `image/heif` のみ。
+- バケットは非公開の `health-images` と `food-images-private` の2つ。上限とMIMEはバケットごとに異なる。
+
+  | バケット              | 上限                | 許可MIME                                                        | 根拠  |
+  | --------------------- | ------------------- | --------------------------------------------------------------- | ----- |
+  | `health-images`       | 10MiB（10,485,760） | `image/jpeg` `image/png` `image/webp` `image/heic` `image/heif` | 6.6節 |
+  | `food-images-private` | 6MB（6,000,000）    | `image/jpeg` `image/png` `image/webp`（HEIC/HEIF 非対応）       | 5.8節 |
+
 - オブジェクトパスは **`<auth.uid()>/<random-uuid>.<検証済み拡張子>`** に固定する。
-  `public.storage_object_path_is_owned(name, auth.uid())` が形を検査し、
-  Storage ポリシーがこれと `public.is_active_user()` を要求する。
+  `public.storage_object_path_is_owned(name, auth.uid(), <許可拡張子>)` が形を検査する。
+  許可拡張子はバケットごとに渡す（`food-images-private` は `heic` / `heif` を含めない）。
+- **パスとメタデータ行の双方で所有者を検査する。** Storage ポリシーは
+  `owner_id = (select auth.uid())::text`（メタデータ行）と上記のパス検査の両方、
+  および `public.is_active_user()` を要求する。`storage.objects.owner_id` は
+  **text 型**であり uuid ではない。
+- `storage.objects` の RLS は **Supabase が既定で有効**にしている。テーブル所有者は
+  `supabase_storage_admin` なので、migration から
+  `alter table storage.objects enable row level security` を実行すると
+  42501（`must be owner of table objects`）で失敗する。migration はポリシー作成のみを行う。
 - 公開URLは保存しない。取得は署名URL経由。
 - 実体の検査（シグネチャ・MIME・寸法・ハッシュ）とメタデータ除去はアップロードAPI側の責務
   （実装仕様書 9.2節）。DB側はパスと所有者の最終防衛線に徹する。

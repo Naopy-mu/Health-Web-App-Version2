@@ -15,7 +15,7 @@
 | `20260827000100_owned_table_conventions.sql` | 版番号・冪等性の共通トリガーと取り付け関数（6.4節）                                        |
 | `20260827000200_identity_core.sql`           | `users` / `user_profiles` / `is_active_user()` / `on_auth_user_created`（6.1・6.2・6.5節） |
 | `20260827000300_identity_rls.sql`            | ID・プロフィールの RLS（6.5節・9章）                                                       |
-| `20260827000400_storage_buckets.sql`         | 非公開バケットと Storage ポリシー（6.6節）                                                 |
+| `20260827000400_storage_buckets.sql`         | 非公開バケットと Storage ポリシー（6.6節・5.8節）                                          |
 
 機能テーブル（身体測定・運動・食事など）は後続フェーズで追加する。追加時の列パターン・
 複合外部キー・楽観ロック・RLS のテンプレートは

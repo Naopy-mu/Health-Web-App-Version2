@@ -41,4 +41,5 @@ Vitest では `src/tests/server-only.ts` のスタブへ差し替えてクライ
 `supabase/migrations/` の SQL migration が正。機能テーブルを追加するときの列パターン・
 複合外部キー・楽観ロック・RLS・Storage の規約は
 [`docs/database/table-conventions.md`](docs/database/table-conventions.md) を参照する。
-migration の検証は `npm test`（PGlite、Docker不要）で行う。
+migration の検証は `npm test`（PGlite、Docker不要）で行う。Docker / Supabase CLI が無い環境で
+検証できず後続フェーズへ送った項目は [`docs/known-issues.md`](docs/known-issues.md) に記録する。

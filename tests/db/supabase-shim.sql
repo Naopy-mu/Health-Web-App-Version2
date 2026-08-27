@@ -76,16 +76,26 @@ create table storage.buckets (
   updated_at         timestamptz not null default now()
 );
 
+-- owner_id は実 Supabase では text 型（uuid ではない）。シムが実環境と乖離すると
+-- ポリシー側の型不一致を検出できなくなるため、実環境に合わせる。
 create table storage.objects (
   id             uuid primary key default gen_random_uuid(),
   bucket_id      text not null references storage.buckets (id),
   name           text not null,
-  owner_id       uuid,
+  owner_id       text,
   metadata       jsonb not null default '{}'::jsonb,
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
   unique (bucket_id, name)
 );
+
+-- Supabase は storage.buckets / storage.objects の RLS を既定で有効にしており、
+-- テーブル所有者は supabase_storage_admin である。そのため migration から
+-- `alter table storage.objects enable row level security` は実行できない
+-- （42501: must be owner of table objects）。有効化はプラットフォーム側の前提として
+-- ここで再現し、migration はポリシー作成のみを行う。
+alter table storage.buckets enable row level security;
+alter table storage.objects enable row level security;
 
 grant select, insert, update, delete on storage.buckets to anon, authenticated, service_role;
 grant select, insert, update, delete on storage.objects to anon, authenticated, service_role;
