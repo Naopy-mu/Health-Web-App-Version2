@@ -32,6 +32,7 @@ import type {
   MeasurementType,
   MutationOutcome,
 } from "@/features/body-measurements/schema";
+import { isDefaultMeasurementKey } from "@/features/body-measurements/defaults";
 import { isUnitAllowedFor } from "@/features/body-measurements/units";
 
 import {
@@ -40,7 +41,9 @@ import {
   measurementConflict,
   measurementDuplicateConflict,
   measurementGoalConflict,
+  measurementTypeArchived,
   measurementTypeConflict,
+  measurementTypeKeyReserved,
   measurementTypeNotFound,
   measurementUnitNotAllowed,
 } from "../api/errors";
@@ -169,6 +172,12 @@ export async function createType(
     return { ok: false, response: measurementUnitNotAllowed() };
   }
 
+  // 実装仕様書 5.3節: 既定カタログのキーは既定種別専用。カスタム種別が名乗ると
+  // 既定種別の偽装になる（DB のトリガーも同じ形を拒否する）。
+  if (isDefaultMeasurementKey(input.measurementKey)) {
+    return { ok: false, response: measurementTypeKeyReserved() };
+  }
+
   // 実装仕様書 6.4節: 適用済みの冪等キーなら同じ成功応答を返す。
   if (clientMutationId !== undefined) {
     const replay = await findTypeByClientMutationId(supabase, ownerId, clientMutationId);
@@ -190,8 +199,9 @@ export async function createType(
       unit_constraint: input.unitConstraint,
       default_unit: input.defaultUnit,
       sort_order: input.sortOrder ?? 1000,
-      // `is_default` はクライアントから指定できない（seed RPC 専用）。
-      is_default: false,
+      // `is_default` は列に触れない。列レベル権限が authenticated から剥奪されており
+      // （migration 600）、値は列の既定 `false` になる。true を名乗れるのは
+      // `seed_default_body_measurement_types()` RPC だけ（実装仕様書 5.3節）。
       client_mutation_id: clientMutationId ?? null,
     })
     .select(MEASUREMENT_TYPE_COLUMNS)
@@ -223,6 +233,74 @@ export async function createType(
   return {
     ok: true,
     value: { type: toMeasurementType(data as unknown as MeasurementTypeRow), outcome: "created" },
+  };
+}
+
+/**
+ * 実装仕様書 5.3節: カスタム種別の**アーカイブによる無効化**（`archived_at`）。
+ *
+ * > カスタム種別はアーカイブ（`archived_at`）による無効化のみを許可し、
+ * > 削除（DELETE）は提供しない（既存の測定記録・目標を保護するため）。
+ * > 既定種別はアーカイブも不可とする。
+ *
+ * 既定種別かどうかは呼び出し側（Route Handler）が種別カタログで判定する。
+ * ここでは楽観ロック（実装仕様書 6.4節）と冪等キーの扱いだけを持つ。
+ */
+export async function archiveType(
+  supabase: SupabaseClient,
+  ownerId: string,
+  typeId: string,
+  archived: boolean,
+  expectedRowVersion: number,
+  clientMutationId: string | undefined,
+): Promise<GuardResult<{ type: MeasurementType; outcome: "updated" | "idempotent_replay" }>> {
+  if (clientMutationId !== undefined) {
+    const replay = await findTypeByClientMutationId(supabase, ownerId, clientMutationId);
+    if (!replay.ok) {
+      return replay;
+    }
+    if (replay.value !== null) {
+      return { ok: true, value: { type: replay.value, outcome: "idempotent_replay" } };
+    }
+  }
+
+  const { data, error } = await supabase
+    .from(MEASUREMENT_TYPES_TABLE)
+    .update({
+      archived_at: archived ? new Date().toISOString() : null,
+      client_mutation_id: clientMutationId ?? null,
+    })
+    .eq("id", typeId)
+    .eq("owner_id", ownerId)
+    .eq("row_version", expectedRowVersion)
+    .select(MEASUREMENT_TYPE_COLUMNS)
+    .maybeSingle();
+
+  // 測定記録・目標と同じ順序（実装仕様書 6.4節）。同時到達した同一冪等キーは
+  // 409 ではなく idempotent_replay として返す。
+  if (error !== null || data === null) {
+    if (clientMutationId !== undefined) {
+      const replay = await findTypeByClientMutationId(supabase, ownerId, clientMutationId);
+      if (!replay.ok) {
+        return replay;
+      }
+      if (replay.value !== null) {
+        return { ok: true, value: { type: replay.value, outcome: "idempotent_replay" } };
+      }
+    }
+
+    if (error === null) {
+      return { ok: false, response: measurementTypeConflict() };
+    }
+    if (error.code === PG_UNIQUE_VIOLATION) {
+      return { ok: false, response: measurementTypeConflict() };
+    }
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+
+  return {
+    ok: true,
+    value: { type: toMeasurementType(data as unknown as MeasurementTypeRow), outcome: "updated" },
   };
 }
 
@@ -357,6 +435,11 @@ export async function saveMeasurement(
   if (!isUnitAllowedFor(type.unitConstraint, input.unit)) {
     return { ok: false, response: measurementUnitNotAllowed() };
   }
+  // 実装仕様書 5.3節「アーカイブ済み種別に対する新規の測定記録・目標登録は拒否する」。
+  // 既存記録の訂正（更新）は妨げない。
+  if (input.id === undefined && type.archivedAt !== null) {
+    return { ok: false, response: measurementTypeArchived() };
+  }
 
   const label = labelOf(type);
 
@@ -386,15 +469,33 @@ export async function saveMeasurement(
       .select(MEASUREMENT_COLUMNS)
       .maybeSingle();
 
-    if (error) {
+    // 実装仕様書 6.4節: 同じ冪等キーの同時到達は「再送」であって競合ではない。
+    // 先着が版番号を進めたあとに届いた側は 0 件更新／一意制約違反になるため、
+    // 409 を返す前に必ず冪等キーで既存の成功結果を探し直す。
+    if (error !== null || data === null) {
+      if (clientMutationId !== undefined) {
+        const replay = await findMeasurementByClientMutationId(
+          supabase,
+          ownerId,
+          clientMutationId,
+          catalog,
+        );
+        if (!replay.ok) {
+          return replay;
+        }
+        if (replay.value !== null) {
+          return { ok: true, value: { measurement: replay.value, outcome: "idempotent_replay" } };
+        }
+      }
+
+      if (error === null) {
+        // 0件更新。存在しない行と版番号違いを区別しない（実装仕様書 6.4節）。
+        return { ok: false, response: measurementConflict() };
+      }
       if (error.code === PG_UNIQUE_VIOLATION) {
         return { ok: false, response: measurementDuplicateConflict() };
       }
       return { ok: false, response: mapUnexpectedError(error) };
-    }
-
-    if (data === null) {
-      return { ok: false, response: measurementConflict() };
     }
 
     return {
@@ -610,6 +711,10 @@ export async function saveGoal(
   if (!isUnitAllowedFor(type.unitConstraint, input.unit)) {
     return { ok: false, response: measurementUnitNotAllowed() };
   }
+  // 実装仕様書 5.3節: アーカイブ済み種別への新規の目標登録は拒否する。
+  if (input.id === undefined && type.archivedAt !== null) {
+    return { ok: false, response: measurementTypeArchived() };
+  }
 
   const label = labelOf(type);
 
@@ -633,14 +738,31 @@ export async function saveGoal(
       .select(MEASUREMENT_GOAL_COLUMNS)
       .maybeSingle();
 
-    if (error) {
+    // 測定記録と同じ順序（実装仕様書 6.4節）。同時到達した同一冪等キーは
+    // 409 ではなく idempotent_replay として扱う。
+    if (error !== null || data === null) {
+      if (clientMutationId !== undefined) {
+        const replay = await findGoalByClientMutationId(
+          supabase,
+          ownerId,
+          clientMutationId,
+          catalog,
+        );
+        if (!replay.ok) {
+          return replay;
+        }
+        if (replay.value !== null) {
+          return { ok: true, value: { goal: replay.value, outcome: "idempotent_replay" } };
+        }
+      }
+
+      if (error === null) {
+        return { ok: false, response: measurementConflict() };
+      }
       if (error.code === PG_UNIQUE_VIOLATION) {
         return { ok: false, response: measurementGoalConflict() };
       }
       return { ok: false, response: mapUnexpectedError(error) };
-    }
-    if (data === null) {
-      return { ok: false, response: measurementConflict() };
     }
 
     return {

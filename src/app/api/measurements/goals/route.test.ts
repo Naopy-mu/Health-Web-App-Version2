@@ -14,6 +14,8 @@ import {
 const APP_ORIGIN = "https://app.example";
 const TYPE_ID = "1e2d3c4b-5a69-4788-9900-aabbccddeeff";
 const GOAL_ID = "5e2d3c4b-5a69-4788-9900-aabbccddeeff";
+const ARCHIVED_TYPE_ID = "6e2d3c4b-5a69-4788-9900-aabbccddeeff";
+const MUTATION_ID = "9e2d3c4b-5a69-4788-9900-aabbccddeeff";
 
 const supabaseState = vi.hoisted(() => ({
   configured: true,
@@ -43,6 +45,21 @@ const typeRows = [
     updated_at: "2026-08-01T00:00:00+00:00",
   },
 ];
+
+const archivedTypeRow = {
+  id: ARCHIVED_TYPE_ID,
+  measurement_key: "grip_strength",
+  display_name: "握力",
+  unit_constraint: "custom",
+  default_unit: "custom",
+  is_default: false,
+  sort_order: 1000,
+  archived_at: "2026-08-20T00:00:00+00:00",
+  row_version: 2,
+  client_mutation_id: null,
+  created_at: "2026-08-01T00:00:00+00:00",
+  updated_at: "2026-08-20T00:00:00+00:00",
+};
 
 const goalRow = (overrides: Record<string, unknown> = {}) => ({
   id: GOAL_ID,
@@ -199,6 +216,127 @@ describe("保存（実装仕様書 6.4節）", () => {
 
     expect(response.status).toBe(409);
     expect((await readError(response)).error.code).toBe("MEASUREMENT_CONFLICT");
+  });
+
+  it("更新は id + owner_id + row_version を WHERE 句に含める（楽観ロック）", async () => {
+    const fake = useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: typeRows, error: null }],
+        "update:body_measurement_goals": [
+          { data: goalRow({ row_version: 3, target_value: 59 }), error: null },
+        ],
+      },
+    });
+
+    const response = await POST(
+      jsonRequest("POST", {
+        goal: { id: GOAL_ID, expectedRowVersion: 2, typeId: TYPE_ID, targetValue: 59, unit: "kg" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect((await readData(response)).outcome).toBe("updated");
+
+    const update = fake.operations.find((operation) => operation.kind === "update");
+    expect(update?.filters).toStrictEqual([
+      { op: "eq", column: "id", value: GOAL_ID },
+      { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+      { op: "eq", column: "row_version", value: 2 },
+    ]);
+    // 版番号はサーバーが進める。保存する値には含めない（実装仕様書 6.4節）。
+    expect(update?.values).not.toHaveProperty("row_version");
+    expect(update?.values).not.toHaveProperty("owner_id");
+  });
+
+  it("冪等キーが適用済みなら同じ目標を idempotent_replay として返す", async () => {
+    const fake = useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: typeRows, error: null }],
+        "select:body_measurement_goals": [
+          { data: goalRow({ client_mutation_id: MUTATION_ID }), error: null },
+        ],
+      },
+    });
+
+    const response = await POST(
+      jsonRequest("POST", {
+        clientMutationId: MUTATION_ID,
+        goal: { typeId: TYPE_ID, targetValue: 60, unit: "kg" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const data = await readData(response);
+    expect(data.outcome).toBe("idempotent_replay");
+    expect((data.goal as { id: string }).id).toBe(GOAL_ID);
+
+    // 再送は INSERT せずに終わる。
+    expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
+
+    const lookup = fake.operations.find(
+      (operation) => operation.kind === "select" && operation.table === "body_measurement_goals",
+    );
+    expect(lookup?.filters).toStrictEqual([
+      { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+      { op: "eq", column: "client_mutation_id", value: MUTATION_ID },
+    ]);
+  });
+
+  it("同じ冪等キーの同時更新は、片方が updated・もう片方が idempotent_replay になる", async () => {
+    // 実装仕様書 6.4節: 同時多重送信でも 409 にせず同一の成功応答を返す。
+    useSupabase({
+      responses: {
+        "select:body_measurement_types": [
+          { data: typeRows, error: null },
+          { data: typeRows, error: null },
+        ],
+        "select:body_measurement_goals": [
+          { data: null, error: null },
+          { data: null, error: null },
+          { data: goalRow({ row_version: 2, client_mutation_id: MUTATION_ID }), error: null },
+        ],
+        "update:body_measurement_goals": [
+          { data: goalRow({ row_version: 2, client_mutation_id: MUTATION_ID }), error: null },
+          { data: null, error: null },
+        ],
+      },
+    });
+
+    const body = {
+      clientMutationId: MUTATION_ID,
+      goal: { id: GOAL_ID, expectedRowVersion: 1, typeId: TYPE_ID, targetValue: 59, unit: "kg" },
+    };
+
+    const [first, second] = await Promise.all([
+      POST(jsonRequest("POST", body)),
+      POST(jsonRequest("POST", body)),
+    ]);
+
+    expect([first.status, second.status]).toStrictEqual([200, 200]);
+
+    const outcomes = [
+      (await readData(first)).outcome as string,
+      (await readData(second)).outcome as string,
+    ].sort();
+    expect(outcomes).toStrictEqual(["idempotent_replay", "updated"]);
+  });
+
+  it("アーカイブ済み種別への新規目標は 400 MEASUREMENT_TYPE_ARCHIVED", async () => {
+    const fake = useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: [...typeRows, archivedTypeRow], error: null }],
+      },
+    });
+
+    const response = await POST(
+      jsonRequest("POST", {
+        goal: { typeId: ARCHIVED_TYPE_ID, targetValue: 45, unit: "custom" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await readError(response)).error.code).toBe("MEASUREMENT_TYPE_ARCHIVED");
+    expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
   });
 
   it("単位制約に合わない単位は 400 MEASUREMENT_UNIT_NOT_ALLOWED", async () => {

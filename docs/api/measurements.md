@@ -67,6 +67,11 @@ await fetch("/api/measurements", {
 - 既に適用済みの `clientMutationId` なら、サーバーは新しい行を作らず
   **同じ成功応答**（`outcome: "idempotent_replay"`、HTTP 200）を返す。
 - 別利用者が同じ UUID を使っても衝突しない（所有者ごとに閉じた一意制約）。
+- **同時多重送信でも同じ**。2つのリクエストが同じ `clientMutationId` で同時に届いた場合、
+  遅れた側は版番号が進んでいて 0 件更新になるが、サーバーは 409 を返さず
+  冪等キーで既存の成功結果を引き直して `idempotent_replay` を返す。
+  409 が返るのは、**別の内容で本当に競合したとき**（冪等キーを送っていない、
+  または別の冪等キーで同じ行を更新しようとしたとき）だけ。
 - 制限: 行の `clientMutationId` は最後のミューテーションの値で上書きされる。
   同じ行を続けて更新した場合、**2つ前**の再送は replay として検出されず 409 になる。
   オフラインキューは順序を保って1件ずつ流すこと。
@@ -84,6 +89,8 @@ await fetch("/api/measurements", {
 | `INVALID_REQUEST`                | 400  | JSON 不正／スキーマ不一致／未知フィールド／所有者IDの持ち込み／不正な `cursor` | `message` をフォームエラーとして表示   |
 | `MEASUREMENT_UNIT_NOT_ALLOWED`   | 400  | 単位が測定種別の単位制約に合わない                                             | 単位セレクトを種別で絞る（下記2.2）    |
 | `MEASUREMENT_TYPE_NOT_FOUND`     | 404  | `typeId` が所有者の測定種別に無い                                              | 種別一覧を取り直す                     |
+| `MEASUREMENT_TYPE_ARCHIVED`      | 400  | アーカイブ済みの種別へ新規の記録・目標を登録しようとした                       | アーカイブ解除を促す（下記6.3）        |
+| `MEASUREMENT_TYPE_KEY_RESERVED`  | 400  | 既定カタログの項目キーをカスタム種別に使おうとした                             | 別のキーを促す（下記2.3）              |
 | `MEASUREMENT_CONFLICT`           | 409  | 版番号不一致、または対象行が無い（更新・削除）                                 | 一覧を再取得して再試行                 |
 | `MEASUREMENT_DUPLICATE_CONFLICT` | 409  | 同一の所有者・種別・日時の記録が既にある                                       | 日時を変えるか既存を編集               |
 | `MEASUREMENT_TYPE_CONFLICT`      | 409  | 同じ項目キーの測定種別が既にある                                               | 別のキーを促す                         |
@@ -106,7 +113,7 @@ await fetch("/api/measurements", {
 | --------------------- | ---------- | ---------------- | ------------- | ----------- |
 | `weight`              | 体重       | `mass`           | `kg`          | 10          |
 | `body_fat_percentage` | 体脂肪率   | `percent`        | `percent`     | 20          |
-| `bmi`                 | BMI        | `percent`        | `percent`     | 30          |
+| `bmi`                 | BMI        | `index`          | `index`       | 30          |
 | `waist`               | ウエスト   | `length`         | `cm`          | 40          |
 | `navel_girth`         | へそ周り   | `length`         | `cm`          | 50          |
 | `pelvis_girth`        | 骨盤周り   | `length`         | `cm`          | 60          |
@@ -118,17 +125,19 @@ await fetch("/api/measurements", {
 TypeScript からは `DEFAULT_MEASUREMENT_TYPES`（`features/body-measurements/defaults.ts`）で
 同じ内容を参照できる。DB のカタログとの一致は `tests/db/body-measurements.test.ts` が検証している。
 
-> **BMI の単位制約が `percent` なのは実装仕様書 5.3節「体脂肪率・BMIは %」に従ったもの。**
-> BMI は本来無次元だが、仕様書の記述を単一の正としている。
+> **BMI の単位制約は `index`（無次元）。** 実装仕様書 5.3節:
+> 「BMIは無次元のため `index`」「**BMIを`percent`として扱わない**（BMIは割合ではないため、
+> `%`表示は誤表示になる）」。画面でも BMI に `%` を付けないこと。
 
 ### 2.2 単位制約（実装仕様書 5.3節）
 
-| `unitConstraint` | 使える `unit` | 対象                       |
-| ---------------- | ------------- | -------------------------- |
-| `mass`           | `kg` `lb`     | 体重                       |
-| `percent`        | `percent`     | 体脂肪率、BMI              |
-| `length`         | `cm` `inch`   | ウエスト等の周囲・長さ     |
-| `custom`         | `custom`      | 単位を持たないカスタム項目 |
+| `unitConstraint` | 使える `unit` | 対象                        |
+| ---------------- | ------------- | --------------------------- |
+| `mass`           | `kg` `lb`     | 体重                        |
+| `percent`        | `percent`     | 体脂肪率                    |
+| `index`          | `index`       | BMI（無次元。単位記号なし） |
+| `length`         | `cm` `inch`   | ウエスト等の周囲・長さ      |
+| `custom`         | `custom`      | 単位を持たないカスタム項目  |
 
 フロントは `isUnitAllowedFor(unitConstraint, unit)`（`units.ts`）で
 単位セレクトを絞ること。合わない単位は 400 `MEASUREMENT_UNIT_NOT_ALLOWED` になる。
@@ -136,6 +145,11 @@ TypeScript からは `DEFAULT_MEASUREMENT_TYPES`（`features/body-measurements/d
 ### 2.3 カスタム項目キー
 
 `^[a-z][a-z0-9_]{1,49}$`（英小文字始まり、2〜50文字）。所有者ごとに一意。
+
+**既定カタログの10キー（2.1節の表）は予約語**で、カスタム種別には使えない
+（400 `MEASUREMENT_TYPE_KEY_RESERVED`）。これを許すと、先に同じキーのカスタム種別を
+作っておくことで既定種別になりすませてしまう（BMI の算出元の偽装など）。
+DB のトリガーも同じ形を拒否する。
 
 ---
 
@@ -171,7 +185,7 @@ TypeScript からは `DEFAULT_MEASUREMENT_TYPES`（`features/body-measurements/d
         "value": 62.4,
         "unit": "kg",
         "normalizedValue": 62.4, // 集計・グラフ・CSV用（実装仕様書 6.3節）
-        "normalizedUnit": "kg", // mass→kg / length→cm / percent→percent / custom→null
+        "normalizedUnit": "kg", // mass→kg / length→cm / percent→percent / index→index / custom→null
         "note": null,
         "measurementCondition": null,
         "bodySite": null,
@@ -256,10 +270,13 @@ CSV に必要な列（`measuredAt` / `measurementKey` / `displayName` / `value` 
   "data": {
     "measurement": { /* 3節と同じ形 */ },
     "outcome": "created" | "updated" | "idempotent_replay",
-    "derivedBmi": 22.1   // 単位制約 mass の種別を保存し、確定プロフィールに身長がある場合のみ。他は null
+    "derivedBmi": 22.1   // 既定の体重種別（isDefault:true かつ measurementKey:"weight"）を保存し、確定プロフィールに身長がある場合のみ。他は null
   }
 }
 ```
+
+`derivedBmi` は**既定の体重種別からのみ**算出する（実装仕様書 5.3節）。
+利用者が自分で作った `kg`/`lb` 種別（例: 荷物の重さ）を保存しても `null` になる。
 
 ### 主な失敗
 
@@ -268,6 +285,7 @@ CSV に必要な列（`measuredAt` / `measurementKey` / `displayName` / `value` 
 | 版番号不一致・対象なし                    | 409 `MEASUREMENT_CONFLICT`           |
 | 同じ種別・同じ日時の記録が既にある        | 409 `MEASUREMENT_DUPLICATE_CONFLICT` |
 | `typeId` が所有者の種別に無い             | 404 `MEASUREMENT_TYPE_NOT_FOUND`     |
+| `typeId` がアーカイブ済み（新規作成のみ） | 400 `MEASUREMENT_TYPE_ARCHIVED`      |
 | 単位が種別の制約に合わない                | 400 `MEASUREMENT_UNIT_NOT_ALLOWED`   |
 | `id` があるのに `expectedRowVersion` 無し | 400 `INVALID_REQUEST`                |
 
@@ -289,10 +307,11 @@ CSV に必要な列（`measuredAt` / `measurementKey` / `displayName` / `value` 
 
 ---
 
-## 6. `POST /api/measurements/types` — 測定種別
+## 6. `/api/measurements/types` — 測定種別
 
 GET は無い（種別一覧は `GET /api/measurements` の `data.types`）。
-DELETE も無い。**無効化は `archived_at` の更新で行う**（既定種別はアーカイブ不可）。
+DELETE も無い。**無効化は `PATCH /api/measurements/types/{id}` のアーカイブで行う**
+（6.3節。既定種別はアーカイブ不可）。
 
 ### 6.1 既定投入
 
@@ -327,11 +346,49 @@ DELETE も無い。**無効化は `archived_at` の更新で行う**（既定種
 { "data": { "types": [ /* 追加した1件 */ ], "outcome": "created" | "idempotent_replay" } }
 ```
 
-`isDefault` はクライアントから指定できない（送ると 400）。
-`is_default` を名乗れるのは既定カタログのキーだけで、DB のトリガーが強制する。
+`isDefault` はクライアントから指定できない（送ると 400）。**既定種別
+（`is_default = true`）を作れるのは `seed_default_body_measurement_types` RPC だけ**で、
+`authenticated` ロールには `is_default` 列の INSERT/UPDATE 権限が無く、
+DB のトリガーも RPC 以外からの書き込みを拒否する（実装仕様書 5.3節・9.2節）。
 
 失敗: 項目キー重複 → 409 `MEASUREMENT_TYPE_CONFLICT`、
+既定カタログの予約キー → 400 `MEASUREMENT_TYPE_KEY_RESERVED`（2.3節）、
 既定単位が制約に合わない → 400 `MEASUREMENT_UNIT_NOT_ALLOWED`。
+
+### 6.3 `PATCH /api/measurements/types/{id}` — アーカイブ／解除
+
+実装仕様書 5.3節:
+
+> カスタム種別は**アーカイブ（`archived_at`）による無効化**のみを許可し、
+> 削除（DELETE）は提供しない（既存の測定記録・目標を保護するため）。
+> 既定種別はアーカイブも不可とする。アーカイブ済み種別に対する新規の
+> 測定記録・目標登録は拒否する。
+
+```jsonc
+// リクエスト
+{
+  "clientMutationId": "…", // 任意。再送の冪等キー（1.5節）
+  "expectedRowVersion": 1, // 必須。楽観ロック（1.4節）
+  "archived": true, // true でアーカイブ、false で解除
+}
+
+// 応答 200
+{ "data": { "type": { /* 2.1節と同じ形 */ }, "outcome": "updated" | "idempotent_replay" } }
+```
+
+アーカイブしても**過去の測定記録・目標は消えない**。一覧（`GET /api/measurements` の
+`data.types`）にはアーカイブ済みも含めて返るので、画面側は `archivedAt !== null` を
+入力候補から外し、履歴の表示には引き続き使うこと。
+
+| 状況                             | 応答                             |
+| -------------------------------- | -------------------------------- |
+| 既定種別をアーカイブしようとした | 400 `INVALID_REQUEST`            |
+| `id` が所有者の種別に無い        | 404 `MEASUREMENT_TYPE_NOT_FOUND` |
+| 版番号不一致・対象なし           | 409 `MEASUREMENT_TYPE_CONFLICT`  |
+
+アーカイブ済み種別へ新規の測定記録・目標を登録しようとすると
+400 `MEASUREMENT_TYPE_ARCHIVED`。**既存の記録の更新は妨げない**
+（アーカイブ前に記録した値を後から直せる）。
 
 ---
 
@@ -392,8 +449,11 @@ DELETE も無い。**無効化は `archived_at` の更新で行う**（既定種
 
 応答 `201`/`200`: `{ "data": { "goal": { … }, "outcome": "created" | "updated" | "idempotent_replay" } }`
 
-同じ種別に未達成の目標が既にあると 409 `MEASUREMENT_GOAL_CONFLICT`。
+同じ種別に未達成の目標が既にあると 409 `MEASUREMENT_GOAL_CONFLICT`
+（実装仕様書 5.3節「未達成の目標は種別ごとに最大1件」）。
 既存の目標を更新するか、`achievedAt` を設定して締めてから新しい目標を作る。
+
+アーカイブ済み種別への新規の目標登録は 400 `MEASUREMENT_TYPE_ARCHIVED`（6.3節）。
 
 ### 7.3 `DELETE`
 
@@ -424,14 +484,14 @@ DELETE も無い。**無効化は `archived_at` の更新で行う**（既定種
 `src/features/body-measurements/units.ts` はサーバーと同じ定数・同じ規則を持つ。
 保存前のプレビュー表示や単位切り替えUIで再利用すること。
 
-| 関数                                          | 内容                                               |
-| --------------------------------------------- | -------------------------------------------------- |
-| `calculateBmi(weightKg, heightCm)`            | 実装仕様書 5.3節の BMI（小数1桁）。不能なら `null` |
-| `poundsToKilograms` / `kilogramsToPounds`     | `0.45359237`                                       |
-| `inchesToCentimeters` / `centimetersToInches` | `2.54`                                             |
-| `normalizeMeasurement(value, unit)`           | 集計用の正規化。`custom` は `null`                 |
-| `isUnitAllowedFor(constraint, unit)`          | 単位制約の判定                                     |
-| `roundTo(value, digits)`                      | 二進小数の誤差に強い丸め                           |
+| 関数                                          | 内容                                                 |
+| --------------------------------------------- | ---------------------------------------------------- |
+| `calculateBmi(weightKg, heightCm)`            | 実装仕様書 5.3節の BMI（小数1桁）。不能なら `null`   |
+| `poundsToKilograms` / `kilogramsToPounds`     | `0.45359237`                                         |
+| `inchesToCentimeters` / `centimetersToInches` | `2.54`                                               |
+| `normalizeMeasurement(value, unit)`           | 集計用の正規化。`index` は素通し、`custom` は `null` |
+| `isUnitAllowedFor(constraint, unit)`          | 単位制約の判定                                       |
+| `roundTo(value, digits)`                      | 二進小数の誤差に強い丸め                             |
 
 保存済みの記録については、**応答の `normalizedValue` / `normalizedUnit` をそのまま使う**
 （DB の生成列が計算しており、クライアント側で再計算する必要はない）。
@@ -451,13 +511,13 @@ DELETE も無い。**無効化は `archived_at` の更新で行う**（既定種
 
 ## 11. 検証状況
 
-| 対象                                                       | テスト                                          |
-| ---------------------------------------------------------- | ----------------------------------------------- |
-| migration の新規適用、制約、生成列、seed RPC、既定種別保護 | `tests/db/body-measurements.test.ts`            |
-| RLS 分離、匿名拒否、非active排除、CASCADE                  | `tests/db/body-measurements-rls.test.ts`        |
-| BMI・単位換算・単位制約                                    | `src/features/body-measurements/units.test.ts`  |
-| 入力スキーマ（`.strict()`・値域・写真参照）                | `src/features/body-measurements/schema.test.ts` |
-| 共通境界・楽観ロック・冪等キー・重複防止・ページング       | `src/app/api/measurements/**/route.test.ts`     |
-| 確定プロフィールからの身長読み出し                         | `src/server/body-measurements/bmi.test.ts`      |
-| カーソルの往復・改竄検出                                   | `src/server/body-measurements/cursor.test.ts`   |
-| 所有者フィールドの拒否                                     | `src/server/api/owner-fields.test.ts`           |
+| 対象                                                                                          | テスト                                          |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| migration の新規適用、制約、生成列、seed RPC、既定種別保護                                    | `tests/db/body-measurements.test.ts`            |
+| RLS 分離、匿名拒否、非active排除、CASCADE、既定種別の偽装拒否、アーカイブ済み種別への登録拒否 | `tests/db/body-measurements-rls.test.ts`        |
+| BMI・単位換算・単位制約                                                                       | `src/features/body-measurements/units.test.ts`  |
+| 入力スキーマ（`.strict()`・値域・写真参照）                                                   | `src/features/body-measurements/schema.test.ts` |
+| 共通境界・楽観ロック・冪等キー（同時多重送信を含む）・重複防止・ページング・アーカイブ        | `src/app/api/measurements/**/route.test.ts`     |
+| 確定プロフィールからの身長読み出し                                                            | `src/server/body-measurements/bmi.test.ts`      |
+| カーソルの往復・形式検証                                                                      | `src/server/body-measurements/cursor.test.ts`   |
+| 所有者フィールドの拒否                                                                        | `src/server/api/owner-fields.test.ts`           |

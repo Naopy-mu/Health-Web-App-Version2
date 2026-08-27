@@ -16,12 +16,15 @@
 -- ---------------------------------------------------------------------------
 -- 単位と単位制約（実装仕様書 5.3節）
 --
--- > 単位: `kg` / `lb` / `cm` / `inch` / `percent` / `custom`。項目種別に応じた
--- > 単位制約（体重は kg|lb、体脂肪率・BMIは %、周囲・長さは cm|inch）を持つ。
+-- > 単位: `kg` / `lb` / `cm` / `inch` / `percent` / `index` / `custom`。項目種別に応じた
+-- > 単位制約（体重は kg|lb、体脂肪率は %、BMIは無次元のため `index`、
+-- > 周囲・長さは cm|inch）を持つ。**BMIを`percent`として扱わない**
+-- > （BMIは割合ではないため、`%`表示は誤表示になる）。
 --
--- 単位制約の識別子は次の4つ。DB・API・フロントで同じ語を使う。
+-- 単位制約の識別子は次の5つ。DB・API・フロントで同じ語を使う。
 --   mass    -> kg | lb
 --   percent -> percent
+--   index   -> index    （無次元。BMI）
 --   length  -> cm | inch
 --   custom  -> custom
 -- ---------------------------------------------------------------------------
@@ -37,6 +40,7 @@ as $$
   select case unit_constraint
     when 'mass'    then unit in ('kg', 'lb')
     when 'percent' then unit = 'percent'
+    when 'index'   then unit = 'index'
     when 'length'  then unit in ('cm', 'inch')
     when 'custom'  then unit = 'custom'
     else false
@@ -44,7 +48,7 @@ as $$
 $$;
 
 comment on function public.body_measurement_unit_is_allowed(text, text) is
-  '実装仕様書 5.3節: 単位制約（mass/percent/length/custom）に対して単位が許されるか。';
+  '実装仕様書 5.3節: 単位制約（mass/percent/index/length/custom）に対して単位が許されるか。';
 
 revoke all on function public.body_measurement_unit_is_allowed(text, text) from public, anon, authenticated;
 grant execute on function public.body_measurement_unit_is_allowed(text, text) to authenticated;
@@ -80,7 +84,8 @@ as $$
     values
       ('weight',              '体重',       'mass',    'kg',      10),
       ('body_fat_percentage', '体脂肪率',   'percent', 'percent', 20),
-      ('bmi',                 'BMI',        'percent', 'percent', 30),
+      -- BMI は無次元（実装仕様書 5.3節）。percent にすると %表示の誤表示になる。
+      ('bmi',                 'BMI',        'index',   'index',   30),
       ('waist',               'ウエスト',   'length',  'cm',      40),
       ('navel_girth',         'へそ周り',   'length',  'cm',      50),
       ('pelvis_girth',        '骨盤周り',   'length',  'cm',      60),
@@ -125,7 +130,7 @@ create table if not exists public.body_measurement_types (
   constraint body_measurement_types_display_name_length
     check (char_length(display_name) between 1 and 100),
   constraint body_measurement_types_unit_constraint_allowed
-    check (unit_constraint in ('mass', 'percent', 'length', 'custom')),
+    check (unit_constraint in ('mass', 'percent', 'index', 'length', 'custom')),
   constraint body_measurement_types_default_unit_matches
     check (public.body_measurement_unit_is_allowed(unit_constraint, default_unit)),
   constraint body_measurement_types_sort_order_range
@@ -138,7 +143,7 @@ create table if not exists public.body_measurement_types (
 comment on table public.body_measurement_types is
   '実装仕様書 5.3節: 測定種別。既定10種は seed_default_body_measurement_types() が所有者ごとに投入する。';
 comment on column public.body_measurement_types.unit_constraint is
-  '実装仕様書 5.3節: mass(kg|lb) / percent(percent) / length(cm|inch) / custom(custom)。';
+  '実装仕様書 5.3節: mass(kg|lb) / percent(percent) / index(index) / length(cm|inch) / custom(custom)。';
 comment on column public.body_measurement_types.is_default is
   '既定カタログ由来の種別。true にできるのは default_body_measurement_types() に載るキーだけ（トリガーで強制）。';
 
@@ -171,6 +176,7 @@ create table if not exists public.body_measurements (
       when 'cm'      then value
       when 'inch'    then value * 2.54
       when 'percent' then value
+      when 'index'   then value
       else null
     end
   ) stored,
@@ -181,6 +187,7 @@ create table if not exists public.body_measurements (
       when 'cm'      then 'cm'
       when 'inch'    then 'cm'
       when 'percent' then 'percent'
+      when 'index'   then 'index'
       else null
     end
   ) stored,
@@ -198,7 +205,7 @@ create table if not exists public.body_measurements (
     unique (owner_id, type_id, measured_at),
   constraint body_measurements_value_range check (value > 0 and value <= 1000),
   constraint body_measurements_unit_allowed
-    check (unit in ('kg', 'lb', 'cm', 'inch', 'percent', 'custom')),
+    check (unit in ('kg', 'lb', 'cm', 'inch', 'percent', 'index', 'custom')),
   constraint body_measurements_note_length check (note is null or char_length(note) <= 500),
   constraint body_measurements_condition_length
     check (measurement_condition is null or char_length(measurement_condition) between 1 and 200),
@@ -225,7 +232,7 @@ create table if not exists public.body_measurements (
 comment on table public.body_measurements is
   '実装仕様書 5.3節: 身体測定の記録。値・単位は入力のまま保存し、集計用の正規化値を生成列で持つ（6.3節）。';
 comment on column public.body_measurements.normalized_value is
-  '実装仕様書 6.3節: 集計用の正規化値。mass -> kg、length -> cm、percent -> percent、custom -> null。';
+  '実装仕様書 6.3節: 集計用の正規化値。mass -> kg、length -> cm、percent -> percent、index -> index、custom -> null。';
 comment on column public.body_measurements.photo_reference is
   '実装仕様書 5.3節: HTTPS URL または storage://health-images/<owner uuid>/... のみ。公開URLは保存しない（6.6節）。';
 
@@ -263,7 +270,7 @@ create table if not exists public.body_measurement_goals (
   constraint body_measurement_goals_start_value_range
     check (start_value is null or (start_value > 0 and start_value <= 1000)),
   constraint body_measurement_goals_unit_allowed
-    check (unit in ('kg', 'lb', 'cm', 'inch', 'percent', 'custom')),
+    check (unit in ('kg', 'lb', 'cm', 'inch', 'percent', 'index', 'custom')),
   constraint body_measurement_goals_note_length check (note is null or char_length(note) <= 500)
 );
 
@@ -279,11 +286,17 @@ create index if not exists body_measurement_goals_owner_target_date_idx
   on public.body_measurement_goals (owner_id, target_date);
 
 -- ---------------------------------------------------------------------------
--- 種別と単位の整合（実装仕様書 5.3節）。
+-- 種別と単位・アーカイブ状態の整合（実装仕様書 5.3節）。
 --
--- 単位制約は別テーブル（body_measurement_types）にあるため CHECK では書けない。
--- 値の妥当性の最終防衛線（9.2節「DB制約とRLSを最終防衛線とする」）として、
+-- 単位制約とアーカイブ日時は別テーブル（body_measurement_types）にあるため
+-- CHECK では書けない。値の妥当性の最終防衛線
+-- （9.2節「DB制約とRLSを最終防衛線とする」）として、
 -- 記録・目標の双方に共通のトリガーを取り付ける。
+--
+-- > アーカイブ済み種別に対する新規の測定記録・目標登録は拒否する。（5.3節）
+--
+-- 拒否するのは**新規登録（INSERT）**だけ。アーカイブ前に記録した行の訂正
+-- （UPDATE）まで塞ぐと、過去データを直せなくなるため。
 -- ---------------------------------------------------------------------------
 create or replace function public.tg_body_measurement_unit_matches_type()
 returns trigger
@@ -293,9 +306,10 @@ set search_path = ''
 as $$
 declare
   constraint_kind text;
+  type_archived_at timestamptz;
 begin
-  select t.unit_constraint
-    into constraint_kind
+  select t.unit_constraint, t.archived_at
+    into constraint_kind, type_archived_at
   from public.body_measurement_types t
   where t.id = new.type_id
     and t.owner_id = new.owner_id;
@@ -303,6 +317,11 @@ begin
   if constraint_kind is null then
     raise exception 'measurement type not found for owner on %', tg_table_name
       using errcode = '23503';
+  end if;
+
+  if tg_op = 'INSERT' and type_archived_at is not null then
+    raise exception 'measurement type is archived; cannot add new rows to % ', tg_table_name
+      using errcode = '23514';
   end if;
 
   if not public.body_measurement_unit_is_allowed(constraint_kind, new.unit) then
@@ -316,7 +335,7 @@ end;
 $$;
 
 comment on function public.tg_body_measurement_unit_matches_type() is
-  '実装仕様書 5.3節: 記録・目標の単位が測定種別の単位制約に合うことをDB側で最終確認する。';
+  '実装仕様書 5.3節: 記録・目標の単位が測定種別の単位制約に合うこと、アーカイブ済み種別へ新規登録しないことをDB側で最終確認する。';
 
 revoke all on function public.tg_body_measurement_unit_matches_type() from public, anon, authenticated;
 
@@ -333,22 +352,52 @@ for each row
 execute function public.tg_body_measurement_unit_matches_type();
 
 -- ---------------------------------------------------------------------------
--- 既定種別の保護（実装仕様書 5.3節）。
---   - is_default を名乗れるのは既定カタログに載るキーだけ。
---   - 既定種別はアーカイブ不可、キー・単位制約・既定フラグの変更不可。
+-- 既定種別（is_default）の保護（実装仕様書 5.3節）。
+--
+-- > 既定種別（`is_default=true`）の作成・変更は、`seed_default_body_measurement_types`
+-- > RPC等のサーバー側処理に限定し、`authenticated`ロールから直接`is_default=true`の
+-- > 行をINSERT/UPDATEできないようにする（既定カタログの偽装・改ざん防止）。
+--
+-- 三重に塞ぐ。
+--   1. 列レベル権限: authenticated へ is_default の INSERT/UPDATE 権限を与えない
+--      （migration 20260827000600）。
+--   2. このトリガー: seed RPC の実行中以外は is_default の作成・変更を拒否する。
+--   3. カタログ判定: is_default を名乗れるのは既定カタログのキーだけ。逆に、
+--      既定カタログのキーはカスタム種別（is_default=false）が名乗れない。
+--      これが無いと「先に custom の `weight` を作る → seed が読み飛ばす」で
+--      既定種別になりすませてしまう。
+--
 -- クライアントが supabase-js で直接書いても成立させないため、API ではなく
 -- DB 側に置く（9.2節「DB制約とRLSを最終防衛線とする」）。
 -- ---------------------------------------------------------------------------
+
+-- seed RPC の実行中かどうかの目印は GUC `app.body_measurement_seed`。RPC が
+-- `set_config(..., is_local => true)` で立て、トランザクション終了とともに消える。
+-- PostgREST 経由のクライアントは任意の GUC を設定できないため、
+-- authenticated からは立てられない。
+-- 判定を別関数へ切り出すと、SECURITY INVOKER のトリガーから呼ぶために
+-- authenticated へ EXECUTE を配る必要が出るため、トリガー内に直接置く。
 create or replace function public.tg_body_measurement_type_guard()
 returns trigger
 language plpgsql
 security invoker
 set search_path = ''
 as $$
+declare
+  seeding boolean := coalesce(
+    pg_catalog.current_setting('app.body_measurement_seed', true),
+    'off'
+  ) = 'on';
+  in_catalog boolean := exists (
+    select 1
+    from public.default_body_measurement_types() d
+    where d.measurement_key = new.measurement_key
+  );
 begin
   -- 既定種別の不変条件を先に見る。カタログ判定より前に置くことで、
   -- 「既定種別のキーを書き換えようとした」に対して的確な文言を返す。
-  if tg_op = 'UPDATE' and old.is_default then
+  -- seed RPC はカタログの正本なので、この不変条件から外す（正規化できる）。
+  if tg_op = 'UPDATE' and old.is_default and not seeding then
     if new.is_default is distinct from old.is_default then
       raise exception 'column "is_default" is immutable on default measurement types'
         using errcode = '23514';
@@ -370,13 +419,31 @@ begin
     end if;
   end if;
 
-  if new.is_default and not exists (
-    select 1
-    from public.default_body_measurement_types() d
-    where d.measurement_key = new.measurement_key
-  ) then
+  if new.is_default and not in_catalog then
     raise exception 'is_default is reserved for the default measurement catalog'
       using errcode = '23514';
+  end if;
+
+  -- 既定カタログのキーは既定種別専用。カスタム種別が名乗ると既定種別の偽装になる。
+  if not new.is_default and in_catalog then
+    raise exception 'measurement_key "%" is reserved for the default measurement catalog',
+      new.measurement_key
+      using errcode = '23514';
+  end if;
+
+  -- is_default の作成・変更は seed RPC からのみ。
+  if not seeding then
+    if tg_op = 'INSERT' and new.is_default then
+      raise exception
+        'is_default measurement types can only be created by public.seed_default_body_measurement_types()'
+        using errcode = '42501';
+    end if;
+
+    if tg_op = 'UPDATE' and new.is_default is distinct from old.is_default then
+      raise exception
+        'column "is_default" can only be changed by public.seed_default_body_measurement_types()'
+        using errcode = '42501';
+    end if;
   end if;
 
   return new;
@@ -384,7 +451,7 @@ end;
 $$;
 
 comment on function public.tg_body_measurement_type_guard() is
-  '実装仕様書 5.3節: 既定種別のフラグ・キー・単位制約を不変にし、アーカイブを禁じる。';
+  '実装仕様書 5.3節: is_default の作成・変更を seed RPC に限定し、既定カタログのキーとフラグの偽装を防ぐ。';
 
 revoke all on function public.tg_body_measurement_type_guard() from public, anon, authenticated;
 

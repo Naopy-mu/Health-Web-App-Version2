@@ -22,7 +22,7 @@ import {
   saveMeasurementRequestSchema,
   type MeasurementContext,
 } from "@/features/body-measurements/schema";
-import { WEIGHT_MEASUREMENT_KEY } from "@/features/body-measurements/defaults";
+import { isDefaultWeightType, WEIGHT_MEASUREMENT_KEY } from "@/features/body-measurements/defaults";
 
 import { guardMutationRequest, readJsonBody } from "@/server/api/guards";
 import { jsonData } from "@/server/api/responses";
@@ -43,7 +43,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * 実装仕様書 5.3節の BMI 用の文脈。身長は確定プロフィール、体重は
- * 既定種別 `weight` の最新記録（kg 正規化済み）から取る。
+ * **既定種別**の `weight`（`is_default = true`）の最新記録（kg 正規化済み）から取る。
+ * 同じキーを名乗るカスタム種別からは取らない（既定種別の偽装を BMI へ波及させない）。
  */
 async function buildContext(
   supabase: SupabaseClient,
@@ -54,7 +55,7 @@ async function buildContext(
   const heightCm = height.ok ? height.value : null;
 
   const weightType = catalog.byKey.get(WEIGHT_MEASUREMENT_KEY);
-  if (weightType === undefined) {
+  if (weightType === undefined || !isDefaultWeightType(weightType)) {
     return { heightCm, latestWeightKg: null, latestWeightMeasuredAt: null, bmi: null };
   }
 
@@ -153,10 +154,16 @@ export async function POST(request: NextRequest): Promise<Response> {
     return saved.response;
   }
 
-  // 実装仕様書 5.3節: 体重の記録には、確定プロフィールの身長から BMI を添える。
+  // 実装仕様書 5.3節:
+  // > BMIの自動算出は、既定の体重種別（`is_default=true` かつ `weight` に対応する種別）を
+  // > 用いた記録に限定する。任意のカスタム `kg`/`lb` 種別からは算出しない。
   const type = catalog.value.byId.get(saved.value.measurement.typeId);
   let derivedBmi: number | null = null;
-  if (type?.unitConstraint === "mass" && saved.value.measurement.normalizedValue !== null) {
+  if (
+    type !== undefined &&
+    isDefaultWeightType(type) &&
+    saved.value.measurement.normalizedValue !== null
+  ) {
     const height = await readConfirmedHeightCm(auth.user.supabase, auth.user.id);
     derivedBmi = deriveBmi(
       saved.value.measurement.normalizedValue,

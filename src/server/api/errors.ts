@@ -38,6 +38,10 @@ export const API_ERROR_CODES = {
   MEASUREMENT_UNIT_NOT_ALLOWED: "MEASUREMENT_UNIT_NOT_ALLOWED",
   /** 404: 測定種別が所有者スコープに見つからない（実装仕様書 5.3節）。 */
   MEASUREMENT_TYPE_NOT_FOUND: "MEASUREMENT_TYPE_NOT_FOUND",
+  /** 400: アーカイブ済みの測定種別へ新規登録しようとした（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_ARCHIVED: "MEASUREMENT_TYPE_ARCHIVED",
+  /** 400: 既定カタログで予約された項目キーをカスタム種別に使おうとした（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_KEY_RESERVED: "MEASUREMENT_TYPE_KEY_RESERVED",
   /** 409: 測定記録の版番号不一致、または対象が存在しない（実装仕様書 6.4節）。 */
   MEASUREMENT_CONFLICT: "MEASUREMENT_CONFLICT",
   /** 409: 同一の所有者・種別・日時の重複登録（実装仕様書 5.3節）。 */
@@ -127,6 +131,28 @@ export const measurementTypeNotFound = () =>
   apiError(API_ERROR_CODES.MEASUREMENT_TYPE_NOT_FOUND, "測定種別が見つかりません。", 404);
 
 /**
+ * 実装仕様書 5.3節:
+ * > アーカイブ済み種別に対する新規の測定記録・目標登録は拒否する。
+ */
+export const measurementTypeArchived = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_ARCHIVED,
+    "アーカイブ済みの測定種別には新しく登録できません。アーカイブを解除してからお試しください。",
+    400,
+  );
+
+/**
+ * 実装仕様書 5.3節: 既定カタログのキーは既定種別（`is_default=true`）専用。
+ * カスタム種別が同じキーを名乗ると既定種別の偽装になるため拒否する。
+ */
+export const measurementTypeKeyReserved = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_KEY_RESERVED,
+    "この項目キーは既定の測定種別で予約されています。別のキーを指定してください。",
+    400,
+  );
+
+/**
  * 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
  * 「行が存在しない場合と版番号が古い場合を区別せず 409 にする」。
  * 他利用者の行の存在有無を漏らさないため、文言でも区別しない。
@@ -145,10 +171,14 @@ export const measurementDuplicateConflict = () =>
     409,
   );
 
+/**
+ * 項目キーの重複（作成）と版番号不一致・対象なし（アーカイブ更新）の双方で使う。
+ * 実装仕様書 6.4節に従い、行の不在と版番号違いは文言でも区別しない。
+ */
 export const measurementTypeConflict = () =>
   apiError(
     API_ERROR_CODES.MEASUREMENT_TYPE_CONFLICT,
-    "同じ項目キーの測定種別が既に存在します。",
+    "測定種別を保存できませんでした。同じ項目キーの種別が既にあるか、他の操作で更新されています。",
     409,
   );
 

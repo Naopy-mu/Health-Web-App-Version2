@@ -121,7 +121,7 @@ describe("既定投入（実装仕様書 5.3節）", () => {
 });
 
 describe("カスタム種別の追加（実装仕様書 5.3節）", () => {
-  it("201 と outcome=created を返し、is_default を false で保存する", async () => {
+  it("201 と outcome=created を返し、is_default 列には触れない", async () => {
     const fake = useSupabase({
       responses: { "insert:body_measurement_types": [{ data: customRow, error: null }] },
     });
@@ -144,7 +144,9 @@ describe("カスタム種別の追加（実装仕様書 5.3節）", () => {
 
     const insert = fake.operations.find((operation) => operation.kind === "insert");
     expect(insert?.values?.owner_id).toBe(DEFAULT_USER_ID);
-    expect(insert?.values?.is_default).toBe(false);
+    // 実装仕様書 5.3節: is_default は authenticated の列レベル権限から外れており、
+    // 送ると permission denied になる。列の既定値 false に任せる。
+    expect(insert?.values).not.toHaveProperty("is_default");
   });
 
   it("項目キーの重複は 409 MEASUREMENT_TYPE_CONFLICT", async () => {
@@ -160,16 +162,40 @@ describe("カスタム種別の追加（実装仕様書 5.3節）", () => {
       postRequest({
         action: "create",
         type: {
-          measurementKey: "weight",
-          displayName: "体重（自作）",
-          unitConstraint: "mass",
-          defaultUnit: "kg",
+          measurementKey: "grip_strength",
+          displayName: "握力（重複）",
+          unitConstraint: "custom",
+          defaultUnit: "custom",
         },
       }),
     );
 
     expect(response.status).toBe(409);
     expect((await readError(response)).error.code).toBe("MEASUREMENT_TYPE_CONFLICT");
+  });
+
+  it("既定カタログのキーは 400 MEASUREMENT_TYPE_KEY_RESERVED（既定種別の偽装を防ぐ）", async () => {
+    const fake = useSupabase();
+
+    for (const measurementKey of DEFAULT_MEASUREMENT_TYPES.map((type) => type.measurementKey)) {
+      const response = await POST(
+        postRequest({
+          action: "create",
+          type: {
+            measurementKey,
+            displayName: "自作",
+            unitConstraint: "custom",
+            defaultUnit: "custom",
+          },
+        }),
+      );
+
+      expect(response.status, measurementKey).toBe(400);
+      expect((await readError(response)).error.code).toBe("MEASUREMENT_TYPE_KEY_RESERVED");
+    }
+
+    // DB へ到達する前に拒否する（実装仕様書 9.2節）。
+    expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
   });
 
   it("既定単位が単位制約に合わなければ 400 MEASUREMENT_UNIT_NOT_ALLOWED", async () => {

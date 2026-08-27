@@ -67,6 +67,41 @@ const typeRows = [
   },
 ];
 
+/** 利用者が自分で作った kg 種別（例: 荷物の重さ）。BMI の算出元にはならない。 */
+const CUSTOM_MASS_TYPE_ID = "5e2d3c4b-5a69-4788-9900-aabbccddeeff";
+/** アーカイブ済みのカスタム種別。 */
+const ARCHIVED_TYPE_ID = "6e2d3c4b-5a69-4788-9900-aabbccddeeff";
+
+const customMassTypeRow = {
+  id: CUSTOM_MASS_TYPE_ID,
+  measurement_key: "luggage_weight",
+  display_name: "荷物の重さ",
+  unit_constraint: "mass",
+  default_unit: "kg",
+  is_default: false,
+  sort_order: 1000,
+  archived_at: null,
+  row_version: 1,
+  client_mutation_id: null,
+  created_at: "2026-08-01T00:00:00+00:00",
+  updated_at: "2026-08-01T00:00:00+00:00",
+};
+
+const archivedTypeRow = {
+  id: ARCHIVED_TYPE_ID,
+  measurement_key: "grip_strength",
+  display_name: "握力",
+  unit_constraint: "custom",
+  default_unit: "custom",
+  is_default: false,
+  sort_order: 1000,
+  archived_at: "2026-08-20T00:00:00+00:00",
+  row_version: 2,
+  client_mutation_id: null,
+  created_at: "2026-08-01T00:00:00+00:00",
+  updated_at: "2026-08-20T00:00:00+00:00",
+};
+
 const measurementRow = (overrides: Record<string, unknown> = {}) => ({
   id: MEASUREMENT_ID,
   type_id: TYPE_ID,
@@ -486,6 +521,183 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
     expect((await readData(response)).outcome).toBe("idempotent_replay");
   });
 
+  it("既定でない mass 種別からは BMI を算出しない（実装仕様書 5.3節）", async () => {
+    useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: [...typeRows, customMassTypeRow], error: null }],
+        "insert:body_measurements": [
+          { data: measurementRow({ type_id: CUSTOM_MASS_TYPE_ID }), error: null },
+        ],
+        "select:user_profiles": [
+          { data: { settings: { confirmed_profile: { heightCm: 168 } } }, error: null },
+        ],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        measurement: {
+          typeId: CUSTOM_MASS_TYPE_ID,
+          measuredAt: "2026-08-27T07:30:00Z",
+          value: 62.4,
+          unit: "kg",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    // 既定の体重種別ではないので、身長が分かっていても BMI は出さない。
+    expect((await readData(response)).derivedBmi).toBeNull();
+  });
+
+  it("アーカイブ済み種別への新規登録は 400 MEASUREMENT_TYPE_ARCHIVED", async () => {
+    const fake = useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: [...typeRows, archivedTypeRow], error: null }],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        measurement: {
+          typeId: ARCHIVED_TYPE_ID,
+          measuredAt: "2026-08-27T07:30:00Z",
+          value: 42,
+          unit: "custom",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await readError(response)).error.code).toBe("MEASUREMENT_TYPE_ARCHIVED");
+    // DB へ到達する前に拒否する。
+    expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
+  });
+
+  it("アーカイブ済み種別でも既存記録の更新はできる（過去データを直せる）", async () => {
+    useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: [...typeRows, archivedTypeRow], error: null }],
+        "update:body_measurements": [
+          {
+            data: measurementRow({ type_id: ARCHIVED_TYPE_ID, unit: "custom", row_version: 3 }),
+            error: null,
+          },
+        ],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        measurement: {
+          id: MEASUREMENT_ID,
+          expectedRowVersion: 2,
+          typeId: ARCHIVED_TYPE_ID,
+          measuredAt: "2026-08-27T07:30:00Z",
+          value: 41,
+          unit: "custom",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect((await readData(response)).outcome).toBe("updated");
+  });
+
+  it("更新の 0 件でも冪等キーが適用済みなら 409 ではなく idempotent_replay", async () => {
+    // 先着のリクエストが版番号を進めたあとに届いた再送。契約上は同じ成功応答を返す。
+    useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: typeRows, error: null }],
+        "select:body_measurements": [
+          // 更新前の事前確認では未適用。
+          { data: null, error: null },
+          // 0 件更新のあとの再確認で、先着が書いた行が見つかる。
+          {
+            data: measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
+            error: null,
+          },
+        ],
+        "update:body_measurements": [{ data: null, error: null }],
+        "select:user_profiles": [{ data: { settings: {} }, error: null }],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        clientMutationId: MUTATION_ID,
+        measurement: {
+          id: MEASUREMENT_ID,
+          expectedRowVersion: 1,
+          typeId: TYPE_ID,
+          measuredAt: "2026-08-27T07:30:00Z",
+          value: 61,
+          unit: "kg",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const data = await readData(response);
+    expect(data.outcome).toBe("idempotent_replay");
+    expect((data.measurement as { rowVersion: number }).rowVersion).toBe(2);
+  });
+
+  it("同じ冪等キーの同時更新は、片方が updated・もう片方が idempotent_replay になる", async () => {
+    // 2つのリクエストを実際に並行で流す。DB では片方だけが版番号一致で更新でき、
+    // 遅れた側は 0 件更新になる。契約（実装仕様書 6.4節）では、遅れた側にも
+    // 409 ではなく同じ成功応答を返さなければならない。
+    useSupabase({
+      responses: {
+        "select:body_measurement_types": [
+          { data: typeRows, error: null },
+          { data: typeRows, error: null },
+        ],
+        "select:body_measurements": [
+          // 双方の事前確認（まだ誰も適用していない）。
+          { data: null, error: null },
+          { data: null, error: null },
+          // 0 件更新になった側の再確認。
+          {
+            data: measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
+            error: null,
+          },
+        ],
+        "update:body_measurements": [
+          // 先着だけが 1 件更新できる。
+          {
+            data: measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
+            error: null,
+          },
+          // 遅れた側は版番号が合わず 0 件。
+          { data: null, error: null },
+        ],
+      },
+    });
+
+    const body = {
+      clientMutationId: MUTATION_ID,
+      measurement: {
+        id: MEASUREMENT_ID,
+        expectedRowVersion: 1,
+        typeId: TYPE_ID,
+        measuredAt: "2026-08-27T07:30:00Z",
+        value: 61,
+        unit: "kg",
+      },
+    };
+
+    const [first, second] = await Promise.all([POST(postRequest(body)), POST(postRequest(body))]);
+
+    expect([first.status, second.status]).toStrictEqual([200, 200]);
+
+    const outcomes = [
+      (await readData(first)).outcome as string,
+      (await readData(second)).outcome as string,
+    ].sort();
+    expect(outcomes).toStrictEqual(["idempotent_replay", "updated"]);
+  });
+
   it("同一の所有者・種別・日時の重複は 409 MEASUREMENT_DUPLICATE_CONFLICT", async () => {
     useSupabase({
       responses: {
@@ -580,6 +792,35 @@ describe("一覧（実装仕様書 5.3節）", () => {
       bmi: 22.1,
     });
     expect(data.page).toStrictEqual({ limit: 100, order: "desc", nextCursor: null });
+  });
+
+  it("weight キーでも既定種別でなければ context の体重・BMI を出さない", async () => {
+    // 既定種別の偽装（同じキーのカスタム種別）を BMI 文脈へ波及させない。
+    const impostor = { ...typeRows[0], is_default: false, unit_constraint: "custom" };
+
+    const fake = useSupabase({
+      responses: {
+        "select:body_measurement_types": [{ data: [impostor], error: null }],
+        "select:body_measurements": [{ data: [], error: null }],
+        "select:user_profiles": [
+          { data: { settings: { confirmed_profile: { heightCm: 168 } } }, error: null },
+        ],
+      },
+    });
+
+    const data = await readData(await GET(getRequest()));
+    expect(data.context).toStrictEqual({
+      heightCm: 168,
+      latestWeightKg: null,
+      latestWeightMeasuredAt: null,
+      bmi: null,
+    });
+
+    // 最新体重の問い合わせ自体を行わない。
+    const weightLookup = fake.operations.filter(
+      (operation) => operation.columns === "normalized_value, measured_at",
+    );
+    expect(weightLookup).toStrictEqual([]);
   });
 
   it("CSV出力に必要な列（正規化値・単位・種別名）が応答に含まれる", async () => {

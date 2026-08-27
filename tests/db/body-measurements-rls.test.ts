@@ -17,6 +17,7 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
   let aliceWeightType: string;
   let bobWeightType: string;
   let aliceMeasurement: string;
+  let aliceGoal: string;
 
   const weightTypeOf = async (userId: string): Promise<string> => {
     const { rows } = await db.query<{ id: string }>(
@@ -64,6 +65,15 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
         [bob, bobWeightType],
       ),
     );
+
+    const aliceGoalRow = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurement_goals (owner_id, type_id, target_value, unit)
+         values ($1, $2, 58, 'kg') returning id`,
+        [alice, aliceWeightType],
+      ),
+    );
+    aliceGoal = aliceGoalRow.rows[0]?.id ?? "";
   }, 60_000);
 
   afterAll(async () => {
@@ -164,10 +174,37 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
     );
     expect(types.rows.map((row) => row.owner_id)).toStrictEqual([alice]);
 
+    // bob も目標を持っているが、alice からは自分の1件だけが見える。
     const goals = await asAuthenticated(db, alice, async () =>
-      db.query<{ id: string }>("select id from public.body_measurement_goals"),
+      db.query<{ id: string; owner_id: string }>(
+        "select id, owner_id from public.body_measurement_goals",
+      ),
     );
-    expect(goals.rows).toStrictEqual([]);
+    expect(goals.rows).toStrictEqual([{ id: aliceGoal, owner_id: alice }]);
+  });
+
+  it("他利用者の測定目標は更新も削除もできない（0件になる）", async () => {
+    const updated = await asAuthenticated(db, bob, async () =>
+      db.query<{ id: string }>(
+        "update public.body_measurement_goals set target_value = 1 where id = $1 returning id",
+        [aliceGoal],
+      ),
+    );
+    expect(updated.rows).toStrictEqual([]);
+
+    const deleted = await asAuthenticated(db, bob, async () =>
+      db.query<{ id: string }>(
+        "delete from public.body_measurement_goals where id = $1 returning id",
+        [aliceGoal],
+      ),
+    );
+    expect(deleted.rows).toStrictEqual([]);
+
+    const untouched = await db.query<{ target_value: string }>(
+      "select target_value::text as target_value from public.body_measurement_goals where id = $1",
+      [aliceGoal],
+    );
+    expect(Number(untouched.rows[0]?.target_value)).toBe(58);
   });
 
   it("measurement_key / unit_constraint / is_default は列レベル権限で更新できない", async () => {
@@ -183,6 +220,132 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
       );
       expect(message, column).toMatch(/permission denied/i);
     }
+  });
+
+  it("authenticated は is_default=true の行を直接作れない (実装仕様書 5.3節)", async () => {
+    // 列レベル権限から is_default が外れているため、値を渡した時点で拒否される。
+    const message = await expectRejection(() =>
+      asAuthenticated(db, alice, async () =>
+        db.query(
+          `insert into public.body_measurement_types
+             (owner_id, measurement_key, display_name, unit_constraint, default_unit, is_default)
+           values ($1, 'fake_default', 'にせ既定', 'custom', 'custom', true)`,
+          [alice],
+        ),
+      ),
+    );
+    expect(message).toMatch(/permission denied/i);
+
+    const stored = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.body_measurement_types
+       where owner_id = $1 and measurement_key = 'fake_default'`,
+      [alice],
+    );
+    expect(stored.rows[0]?.count).toBe("0");
+  });
+
+  it("既定カタログのキーはカスタム種別が名乗れない（既定種別の偽装を防ぐ）", async () => {
+    // is_default を送らなくても、キーそのものが予約されている。
+    // これが無いと「先に custom の weight を作る → seed が読み飛ばす」で偽装できる。
+    const other = await signUp(db, "rls-impostor@example.test");
+
+    const message = await expectRejection(() =>
+      asAuthenticated(db, other, async () =>
+        db.query(
+          `insert into public.body_measurement_types
+             (owner_id, measurement_key, display_name, unit_constraint, default_unit)
+           values ($1, 'weight', '体重（自作）', 'custom', 'custom')`,
+          [other],
+        ),
+      ),
+    );
+    expect(message).toContain("reserved for the default measurement catalog");
+
+    // 正規の経路（seed RPC）なら既定種別として入る。
+    await asAuthenticated(db, other, async () =>
+      db.query("select public.seed_default_body_measurement_types()"),
+    );
+    const seeded = await db.query<{ is_default: boolean; unit_constraint: string }>(
+      `select is_default, unit_constraint from public.body_measurement_types
+       where owner_id = $1 and measurement_key = 'weight'`,
+      [other],
+    );
+    expect(seeded.rows[0]).toStrictEqual({ is_default: true, unit_constraint: "mass" });
+  });
+
+  it("アーカイブ済み種別へは新規登録できないが、既存行の訂正はできる (実装仕様書 5.3節)", async () => {
+    const custom = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurement_types
+           (owner_id, measurement_key, display_name, unit_constraint, default_unit)
+         values ($1, 'grip_strength', '握力', 'custom', 'custom') returning id`,
+        [alice],
+      ),
+    );
+    const customType = custom.rows[0]?.id ?? "";
+
+    const before = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurements (owner_id, type_id, measured_at, value, unit)
+         values ($1, $2, timestamptz '2026-07-02T00:00:00Z', 40, 'custom') returning id`,
+        [alice, customType],
+      ),
+    );
+    const beforeArchive = before.rows[0]?.id ?? "";
+
+    const archived = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        "update public.body_measurement_types set archived_at = now() where id = $1 returning id",
+        [customType],
+      ),
+    );
+    expect(archived.rows).toHaveLength(1);
+
+    const newMeasurement = await expectRejection(() =>
+      asAuthenticated(db, alice, async () =>
+        db.query(
+          `insert into public.body_measurements (owner_id, type_id, measured_at, value, unit)
+           values ($1, $2, timestamptz '2026-07-03T00:00:00Z', 41, 'custom')`,
+          [alice, customType],
+        ),
+      ),
+    );
+    expect(newMeasurement).toContain("measurement type is archived");
+
+    const newGoal = await expectRejection(() =>
+      asAuthenticated(db, alice, async () =>
+        db.query(
+          `insert into public.body_measurement_goals (owner_id, type_id, target_value, unit)
+           values ($1, $2, 45, 'custom')`,
+          [alice, customType],
+        ),
+      ),
+    );
+    expect(newGoal).toContain("measurement type is archived");
+
+    // 既存の記録は直せる（アーカイブは過去データを凍結しない）。
+    const corrected = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        "update public.body_measurements set value = 39 where id = $1 returning id",
+        [beforeArchive],
+      ),
+    );
+    expect(corrected.rows).toHaveLength(1);
+
+    // アーカイブ解除で再び登録できる。
+    await asAuthenticated(db, alice, async () =>
+      db.query("update public.body_measurement_types set archived_at = null where id = $1", [
+        customType,
+      ]),
+    );
+    const reopened = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurements (owner_id, type_id, measured_at, value, unit)
+         values ($1, $2, timestamptz '2026-07-04T00:00:00Z', 42, 'custom') returning id`,
+        [alice, customType],
+      ),
+    );
+    expect(reopened.rows).toHaveLength(1);
   });
 
   it("測定種別の DELETE は authenticated に許可されていない（archived_at で無効化する）", async () => {
@@ -225,14 +388,52 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
     );
     expect(insertedMeasurement).toMatch(/measurement type not found for owner|row-level security/i);
 
+    // 目標も同じく見えない（種別テーブルではなく目標テーブルを確かめる）。
     const goalsVisible = await asAuthenticated(db, alice, async () =>
       db.query<{ count: string }>(
-        "select count(*)::text as count from public.body_measurement_types",
+        "select count(*)::text as count from public.body_measurement_goals",
       ),
     );
     expect(goalsVisible.rows[0]?.count).toBe("0");
 
+    // 非active では自分の目標の作成・更新・削除も通らない。
+    const insertedGoal = await expectRejection(() =>
+      asAuthenticated(db, alice, async () =>
+        db.query(
+          `insert into public.body_measurement_goals (owner_id, type_id, target_value, unit)
+           values ($1, $2, 57, 'kg')`,
+          [alice, aliceWeightType],
+        ),
+      ),
+    );
+    expect(insertedGoal).toMatch(/measurement type not found for owner|row-level security/i);
+
+    const updatedGoal = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        "update public.body_measurement_goals set target_value = 2 where id = $1 returning id",
+        [aliceGoal],
+      ),
+    );
+    expect(updatedGoal.rows).toStrictEqual([]);
+
+    const deletedGoal = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        "delete from public.body_measurement_goals where id = $1 returning id",
+        [aliceGoal],
+      ),
+    );
+    expect(deletedGoal.rows).toStrictEqual([]);
+
     await db.query("update public.users set status = 'active' where id = $1", [alice]);
+
+    // active へ戻せば自分の目標はそのまま残っている。
+    const restored = await asAuthenticated(db, alice, async () =>
+      db.query<{ target_value: string }>(
+        "select target_value::text as target_value from public.body_measurement_goals where id = $1",
+        [aliceGoal],
+      ),
+    );
+    expect(Number(restored.rows[0]?.target_value)).toBe(58);
   });
 
   it("アカウント削除で測定データが CASCADE 削除される (実装仕様書 6.2節)", async () => {

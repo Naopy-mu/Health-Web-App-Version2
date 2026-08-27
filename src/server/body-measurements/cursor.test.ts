@@ -23,7 +23,10 @@ describe("測定一覧のカーソル", () => {
     expect(decoded).toBe(`${AT}|${ID}`);
   });
 
-  it("壊れた・改竄された値は null", () => {
+  // 署名は付けていないため、これは改竄の検出ではなく**形式の検証**。
+  // カーソルが指せるのは所有者スコープ内の行だけなので（クエリに
+  // `owner_id = <session uid>` が必ず付く）、値を作り替えても他人の行は読めない。
+  it("形式に合わない値は null（日時とUUIDの2要素であることだけを検証する）", () => {
     for (const raw of [
       "not-a-cursor",
       Buffer.from("only-one-part").toString("base64url"),

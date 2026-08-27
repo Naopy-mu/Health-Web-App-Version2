@@ -350,6 +350,7 @@ describe("測定記録の制約 (実装仕様書 5.3節)", () => {
   let owner: string;
   let weightTypeId: string;
   let waistTypeId: string;
+  let bmiTypeId: string;
 
   const insertMeasurement = async (columns: string, values: string, params: readonly unknown[]) =>
     db.query<{ id: string }>(
@@ -370,6 +371,7 @@ describe("測定記録の制約 (実装仕様書 5.3節)", () => {
     );
     weightTypeId = types.rows.find((row) => row.measurement_key === "weight")?.id ?? "";
     waistTypeId = types.rows.find((row) => row.measurement_key === "waist")?.id ?? "";
+    bmiTypeId = types.rows.find((row) => row.measurement_key === "bmi")?.id ?? "";
   }, 60_000);
 
   afterAll(async () => {
@@ -471,6 +473,34 @@ describe("測定記録の制約 (実装仕様書 5.3節)", () => {
     );
     expect(converted.rows[0]?.normalized_unit).toBe("cm");
     expect(Number(converted.rows[0]?.normalized_value)).toBeCloseTo(30 * CENTIMETERS_PER_INCH, 6);
+  });
+
+  it("BMI は index 単位で保存し、percent を拒否する (実装仕様書 5.3節)", async () => {
+    // > BMIは無次元のため `index`。**BMIを`percent`として扱わない**
+    const rejected = await expectRejection(() =>
+      insertMeasurement(
+        "owner_id, type_id, measured_at, value, unit",
+        "$1, $2, timestamptz '2026-04-01T00:00:00Z', 22.1, 'percent'",
+        [owner, bmiTypeId],
+      ),
+    );
+    expect(rejected).toContain('unit "percent" is not allowed for unit_constraint "index"');
+
+    const accepted = await insertMeasurement(
+      "owner_id, type_id, measured_at, value, unit",
+      "$1, $2, timestamptz '2026-04-01T00:00:00Z', 22.1, 'index'",
+      [owner, bmiTypeId],
+    );
+    expect(accepted.rows).toHaveLength(1);
+
+    // 無次元なので正規化しても値・単位が変わらない（実装仕様書 6.3節）。
+    const normalized = await db.query<{ normalized_value: string; normalized_unit: string }>(
+      `select normalized_value::text as normalized_value, normalized_unit
+       from public.body_measurements where id = $1`,
+      [accepted.rows[0]?.id],
+    );
+    expect(normalized.rows[0]?.normalized_unit).toBe("index");
+    expect(Number(normalized.rows[0]?.normalized_value)).toBe(22.1);
   });
 
   it("メモ500字・測定条件200字・測定部位100字の上限を課す", async () => {

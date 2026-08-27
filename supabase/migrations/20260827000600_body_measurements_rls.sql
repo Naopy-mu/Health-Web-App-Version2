@@ -25,7 +25,24 @@ revoke all on table public.body_measurement_types from public;
 revoke all on table public.body_measurement_types from anon;
 revoke all on table public.body_measurement_types from authenticated;
 
-grant select, insert on table public.body_measurement_types to authenticated;
+grant select on table public.body_measurement_types to authenticated;
+
+-- 実装仕様書 5.3節「既定種別（`is_default=true`）の作成・変更は
+-- `seed_default_body_measurement_types` RPC等のサーバー側処理に限定し、
+-- `authenticated`ロールから直接`is_default=true`の行をINSERT/UPDATEできないようにする」。
+--
+-- INSERT も**列レベル**で与える。テーブル全体の INSERT 権限を与えると
+-- `is_default => true` を含む任意の行を直接作れてしまい、既定カタログを偽装できる。
+-- is_default を列挙から外すと、authenticated からの INSERT はこの列に触れられず、
+-- 列の既定値 `false` が必ず入る。true を書けるのは SECURITY DEFINER の seed RPC だけ
+-- （migration 20260827000700）。row_version / created_at / updated_at は
+-- `apply_owned_mutable_table_conventions()` のトリガーがサーバー側で決めるため、
+-- クライアントには渡さない（実装仕様書 6.4節）。
+grant insert (
+  owner_id, measurement_key, display_name, unit_constraint, default_unit,
+  sort_order, client_mutation_id
+) on table public.body_measurement_types to authenticated;
+
 -- 更新できるのは表示名・既定単位・並び順・アーカイブ日時と冪等キーのみ。
 -- measurement_key / unit_constraint / is_default は列レベル権限で除外する。
 grant update (display_name, default_unit, sort_order, archived_at, client_mutation_id)
@@ -55,6 +72,8 @@ with check (owner_id = (select auth.uid()) and public.is_active_user());
 
 comment on policy body_measurement_types_select_own on public.body_measurement_types is
   '実装仕様書 6.5節: 所有者本人かつ active のときのみ参照できる。';
+comment on policy body_measurement_types_insert_own on public.body_measurement_types is
+  '実装仕様書 5.3節: 自分の種別だけを作れる。is_default は列レベル権限で除外され、seed RPC 以外からは false のまま。';
 
 -- ---------------------------------------------------------------------------
 -- public.body_measurements

@@ -71,7 +71,7 @@ describe("cm ↔ inch の相互変換", () => {
 });
 
 describe("正規化（実装仕様書 6.3節の集計用の値）", () => {
-  it("mass は kg、length は cm、percent はそのまま", () => {
+  it("mass は kg、length は cm、percent と index はそのまま", () => {
     expect(normalizeMeasurement(62, "kg")).toStrictEqual({ value: 62, unit: "kg" });
     expect(normalizeMeasurement(140, "lb")).toStrictEqual({
       value: 140 * KILOGRAMS_PER_POUND,
@@ -83,6 +83,8 @@ describe("正規化（実装仕様書 6.3節の集計用の値）", () => {
       unit: "cm",
     });
     expect(normalizeMeasurement(18.4, "percent")).toStrictEqual({ value: 18.4, unit: "percent" });
+    // 無次元なので換算しない。
+    expect(normalizeMeasurement(22.1, "index")).toStrictEqual({ value: 22.1, unit: "index" });
   });
 
   it("custom は正規化しない", () => {
@@ -97,7 +99,7 @@ describe("正規化（実装仕様書 6.3節の集計用の値）", () => {
 });
 
 describe("単位制約（実装仕様書 5.3節）", () => {
-  it("体重は kg|lb、体脂肪率・BMIは percent、周囲・長さは cm|inch", () => {
+  it("体重は kg|lb、体脂肪率は percent、BMIは index、周囲・長さは cm|inch", () => {
     expect(isUnitAllowedFor("mass", "kg")).toBe(true);
     expect(isUnitAllowedFor("mass", "lb")).toBe(true);
     expect(isUnitAllowedFor("mass", "cm")).toBe(false);
@@ -105,6 +107,11 @@ describe("単位制約（実装仕様書 5.3節）", () => {
 
     expect(isUnitAllowedFor("percent", "percent")).toBe(true);
     expect(isUnitAllowedFor("percent", "kg")).toBe(false);
+
+    // 実装仕様書 5.3節「BMIは無次元のため `index`」。percent とは混ぜない。
+    expect(isUnitAllowedFor("index", "index")).toBe(true);
+    expect(isUnitAllowedFor("index", "percent")).toBe(false);
+    expect(isUnitAllowedFor("percent", "index")).toBe(false);
 
     expect(isUnitAllowedFor("length", "cm")).toBe(true);
     expect(isUnitAllowedFor("length", "inch")).toBe(true);

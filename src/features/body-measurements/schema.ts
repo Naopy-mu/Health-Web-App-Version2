@@ -161,7 +161,7 @@ export const measurementTypeSchema = z
 export type MeasurementType = z.infer<typeof measurementTypeSchema>;
 
 /** 正規化値の単位（実装仕様書 6.3節の集計用の値）。`custom` の記録では `null`。 */
-export const normalizedUnitSchema = z.enum(["kg", "cm", "percent"]);
+export const normalizedUnitSchema = z.enum(["kg", "cm", "percent", "index"]);
 
 /** `public.body_measurements` の1行（API 表現）。 */
 export const measurementSchema = z
@@ -362,8 +362,9 @@ export const saveMeasurementResponseSchema = z
         measurement: measurementSchema,
         outcome: mutationOutcomeSchema,
         /**
-         * 実装仕様書 5.3節の BMI。体重（単位制約 `mass`）の記録を保存したとき、
-         * 確定プロフィールの身長が分かっていれば算出して返す。それ以外は `null`。
+         * 実装仕様書 5.3節の BMI。**既定の体重種別**（`isDefault: true` かつ
+         * `measurementKey: "weight"`）の記録を保存したとき、確定プロフィールの身長が
+         * 分かっていれば算出して返す。カスタムの `kg`/`lb` 種別からは算出しない（`null`）。
          */
         derivedBmi: z.number().nullable(),
       })
@@ -444,6 +445,42 @@ export const measurementTypeResponseSchema = z
   .strict();
 
 export type MeasurementTypeResponse = z.infer<typeof measurementTypeResponseSchema>;
+
+/* -------------------------------------------------------------------------- */
+/* PATCH /api/measurements/types/{id}                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 実装仕様書 5.3節:
+ * > カスタム種別は**アーカイブ（`archived_at`）による無効化**のみを許可し、
+ * > 削除（DELETE）は提供しない（既存の測定記録・目標を保護するため）。
+ * > 既定種別はアーカイブも不可とする。
+ *
+ * `archived: true` で `archived_at` を設定し、`false` で解除する。
+ * 既定種別に対する要求は 400 で拒否される（DB の CHECK 制約も同じ形を禁じる）。
+ */
+export const archiveMeasurementTypeRequestSchema = z
+  .object({
+    clientMutationId: clientMutationIdSchema.optional(),
+    /** 実装仕様書 6.4節: 楽観ロックの期待版番号。 */
+    expectedRowVersion: rowVersionSchema,
+    archived: z.boolean(),
+  })
+  .strict();
+
+export type ArchiveMeasurementTypeRequest = z.infer<typeof archiveMeasurementTypeRequestSchema>;
+
+export const measurementTypeUpdateOutcomeSchema = z.enum(["updated", "idempotent_replay"]);
+
+export const archiveMeasurementTypeResponseSchema = z
+  .object({
+    data: z
+      .object({ type: measurementTypeSchema, outcome: measurementTypeUpdateOutcomeSchema })
+      .strict(),
+  })
+  .strict();
+
+export type ArchiveMeasurementTypeResponse = z.infer<typeof archiveMeasurementTypeResponseSchema>;
 
 /* -------------------------------------------------------------------------- */
 /* /api/measurements/goals                                                     */

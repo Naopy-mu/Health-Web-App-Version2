@@ -38,10 +38,11 @@ export const DEFAULT_MEASUREMENT_TYPES: readonly DefaultMeasurementType[] = Obje
     sortOrder: 20,
   },
   {
+    // 実装仕様書 5.3節「BMIは無次元のため `index`」。`percent` にすると %表示の誤表示になる。
     measurementKey: "bmi",
     displayName: "BMI",
-    unitConstraint: "percent",
-    defaultUnit: "percent",
+    unitConstraint: "index",
+    defaultUnit: "index",
     sortOrder: 30,
   },
   {
@@ -107,3 +108,23 @@ export const DEFAULT_MEASUREMENT_KEYS: readonly string[] = Object.freeze(
 
 export const isDefaultMeasurementKey = (key: string): boolean =>
   DEFAULT_MEASUREMENT_KEYS.includes(key);
+
+/** BMI の算出元として認める種別の形（実装仕様書 5.3節）。 */
+export type WeightTypeCandidate = {
+  readonly measurementKey: string;
+  readonly unitConstraint: string;
+  readonly isDefault: boolean;
+};
+
+/**
+ * 実装仕様書 5.3節:
+ * > BMIの自動算出は、**既定の体重種別（`is_default=true`かつ `weight` に対応する種別）を
+ * > 用いた記録に限定**する。任意のカスタム`kg`/`lb`種別からは算出しない。
+ *
+ * 単に「単位制約が mass」で判定すると、利用者が作った任意の kg 種別（例: 荷物の重さ）から
+ * BMI が出てしまう。既定カタログ由来であることまで確かめる。
+ */
+export const isDefaultWeightType = (type: WeightTypeCandidate): boolean =>
+  type.isDefault &&
+  type.measurementKey === WEIGHT_MEASUREMENT_KEY &&
+  type.unitConstraint === "mass";
