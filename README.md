@@ -5,8 +5,38 @@
 
 ## 現在の状態
 
-Phase 1（DBスキーマ基盤）まで完了。`users` / `user_profiles` と共通パターン（RLS・版番号・
-冪等性・複合外部キー・Storage）のみで、機能テーブルと機能実装は未着手。
+Phase 2（認証・アカウント基盤）まで完了。Supabaseクライアント構成、認証画面（`/auth` 系）、
+保護ルートのプロキシ、API共通境界、デモモード骨格、データ出力・削除の骨格までを実装した。
+測定・運動・食事などの機能テーブルと機能画面は Phase 3 以降で着手する。
+
+| フェーズ | 範囲                                                              |
+| -------- | ----------------------------------------------------------------- |
+| Phase 0  | プロジェクト初期化・共通基盤                                      |
+| Phase 1  | DBスキーマ基盤（`users` / `user_profiles`、RLS基盤、Storage基盤） |
+| Phase 2  | 認証・アカウント基盤（実装仕様書 3章・5.1節・7章・9章）           |
+
+## 認証・アカウント基盤（Phase 2、実装仕様書 5.1節）
+
+| 画面・API                                                    | 役割                                                |
+| ------------------------------------------------------------ | --------------------------------------------------- |
+| `/auth`                                                      | メール+パスワード、サインアップ、Magic Link、Google |
+| `/auth/forgot-password` / `/auth/update-password`            | パスワード再設定要求と新しいパスワードの設定        |
+| `/auth/session`                                              | ログイン後の着地点。セッション確認とログアウト      |
+| `/auth/callback` / `/auth/confirm`                           | OAuth・Magic Link のコード交換、メール確認          |
+| `/demo`                                                      | 資格情報不要のデモモード骨格（IndexedDB のみ）      |
+| `/api/account` / `/api/account/data` / `/api/account/export` | アカウント削除・健康データ削除・データ出力の骨格    |
+
+- 保護ルートは `src/proxy.ts` → `src/lib/supabase/proxy.ts` の `protectedRoutePrefixes` で
+  判定し、未認証は `/auth?next=...` へ丸める（実装仕様書 3.3節）。
+- ログイン後の遷移先 `next` は `src/features/auth/redirect.ts` の `sanitizeNextPath` を
+  必ず通す。外部オリジン・`//`・バックスラッシュ・NUL は `/auth/session` へ丸める
+  （実装仕様書 5.1節、オープンリダイレクト対策）。
+- 状態変更APIの共通境界（same-origin検証、`Content-Type: application/json`、
+  リクエストボディ64KiB上限、`Cache-Control: no-store`、`{ error: { code, message } }`）は
+  `src/server/api/` に集約する（実装仕様書 7章）。
+- 所有者は常に `requireActiveUser()` が検証済みセッションから導出し、リクエストボディの
+  `owner_id` / `user_id` は使わない。Supabase未設定は 503、`users.status` が active 以外は
+  403 を返す（実装仕様書 3.2節・3.3節・5.1節）。
 
 ## 前提
 
