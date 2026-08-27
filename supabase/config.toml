@@ -1,0 +1,76 @@
+# ローカル Supabase（Supabase CLI）の最小構成。
+# 実装仕様書 2章「技術構成」/ 5.1節「認証・アカウント」/ 6.6節「ストレージ」に対応する。
+#
+# 秘密値はここへ書かない（実装仕様書 9.2節）。外部プロバイダーの資格情報は
+# ローカルでは空のままにし、必要な場合のみ Git 管理外の設定で与える。
+
+project_id = "health-web-app"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[studio]
+enabled = true
+port = 54323
+
+# ローカルのメール受信箱（確認メール・Magic Link の確認用）。
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+# 実装仕様書 6.6節: health-images は最大10MiB。バケット個別の上限は migration で設定する。
+file_size_limit = "10MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = [
+  "http://localhost:3000/auth/callback",
+  "http://localhost:3000/auth/confirm",
+]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+enable_signup = true
+enable_anonymous_sign_ins = false
+# 実装仕様書 5.1節: パスワードは8文字以上。
+minimum_password_length = 8
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = true
+secure_password_change = true
+max_frequency = "1m"
+otp_length = 6
+otp_expiry = 3600
+
+# 実装仕様書 5.1節: Googleログインは認証に必要な最小スコープのみを要求し、
+# Google Calendar の権限同意とは完全に分離する（Calendar 連携は別フローで扱う）。
+# ローカルでは既定で無効。有効化する場合も資格情報をこのファイルへ書かないこと。
+[auth.external.google]
+enabled = false
+client_id = ""
+secret = ""
+redirect_uri = "http://localhost:54321/auth/v1/callback"
+skip_nonce_check = false
+
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false
