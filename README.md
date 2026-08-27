@@ -5,7 +5,8 @@
 
 ## 現在の状態
 
-Phase 0（プロジェクト初期化・共通基盤）のみ完了。機能実装は未着手。
+Phase 1（DBスキーマ基盤）まで完了。`users` / `user_profiles` と共通パターン（RLS・版番号・
+冪等性・複合外部キー・Storage）のみで、機能テーブルと機能実装は未着手。
 
 ## 前提
 
@@ -34,3 +35,11 @@ npm run dev
 
 実装仕様書 2.1節に準拠する。サーバー専用モジュールは `import "server-only";` を宣言し、
 Vitest では `src/tests/server-only.ts` のスタブへ差し替えてクライアント混入を禁止する。
+
+## データベース
+
+`supabase/migrations/` の SQL migration が正。機能テーブルを追加するときの列パターン・
+複合外部キー・楽観ロック・RLS・Storage の規約は
+[`docs/database/table-conventions.md`](docs/database/table-conventions.md) を参照する。
+migration の検証は `npm test`（PGlite、Docker不要）で行う。Docker / Supabase CLI が無い環境で
+検証できず後続フェーズへ送った項目は [`docs/known-issues.md`](docs/known-issues.md) に記録する。
