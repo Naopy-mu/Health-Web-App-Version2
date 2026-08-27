@@ -12,6 +12,9 @@ Phase 1「DBスキーマ基盤」で用意した共通ルールをまとめる�
 | `supabase/migrations/20260827000200_identity_core.sql`           | `public.users` / `public.user_profiles` / `is_active_user()` / `on_auth_user_created`（6.1・6.2・6.5節） |
 | `supabase/migrations/20260827000300_identity_rls.sql`            | ID・プロフィールの RLS（6.5節・9章）                                                                     |
 | `supabase/migrations/20260827000400_storage_buckets.sql`         | 非公開バケットと Storage ポリシー（6.6節）                                                               |
+| `supabase/migrations/20260827000500_body_measurements.sql`       | 身体測定の3テーブル（5.3節）。**本書のテンプレートを適用した最初の機能テーブル**                         |
+| `supabase/migrations/20260827000600_body_measurements_rls.sql`   | 身体測定の RLS（6.5節・9章）                                                                             |
+| `supabase/migrations/20260827000700_body_measurement_seed.sql`   | `seed_default_body_measurement_types()` RPC（5.3節）                                                     |
 
 migration のファイル名は `YYYYMMDDHHMMSS_<snake_case>.sql`。番号は既存の最大値より必ず大きくする。
 
@@ -123,6 +126,11 @@ select public.apply_owned_mutable_table_conventions('public.workout_routine_item
 （`foreign key (id, owner_id) references public.users (id, owner_id)`）。
 テンプレートが後続フェーズでもそのまま動くことは
 `tests/db/mutation-patterns.test.ts` の「機能テーブルのテンプレート検証」で確認している。
+
+**機能テーブルでの実例は Phase 3a の身体測定**（`body_measurements` / `body_measurement_goals` →
+`body_measurement_types`）。API 側の楽観ロック・冪等キーの扱いを含めた一式は
+`src/server/body-measurements/repository.ts` と `docs/api/measurements.md` が
+後続フェーズの参照実装になる。
 
 ---
 

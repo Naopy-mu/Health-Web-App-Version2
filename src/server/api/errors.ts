@@ -34,6 +34,18 @@ export const API_ERROR_CODES = {
   JSON_REQUIRED: "JSON_REQUIRED",
   /** 400: JSONとして解釈できない、またはスキーマに合致しない。 */
   INVALID_REQUEST: "INVALID_REQUEST",
+  /** 400: 単位が測定種別の単位制約に合わない（実装仕様書 5.3節）。 */
+  MEASUREMENT_UNIT_NOT_ALLOWED: "MEASUREMENT_UNIT_NOT_ALLOWED",
+  /** 404: 測定種別が所有者スコープに見つからない（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_NOT_FOUND: "MEASUREMENT_TYPE_NOT_FOUND",
+  /** 409: 測定記録の版番号不一致、または対象が存在しない（実装仕様書 6.4節）。 */
+  MEASUREMENT_CONFLICT: "MEASUREMENT_CONFLICT",
+  /** 409: 同一の所有者・種別・日時の重複登録（実装仕様書 5.3節）。 */
+  MEASUREMENT_DUPLICATE_CONFLICT: "MEASUREMENT_DUPLICATE_CONFLICT",
+  /** 409: 測定種別の項目キー重複、または版番号不一致（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_CONFLICT: "MEASUREMENT_TYPE_CONFLICT",
+  /** 409: 未達成の測定目標が既にある、または版番号不一致（実装仕様書 5.3節）。 */
+  MEASUREMENT_GOAL_CONFLICT: "MEASUREMENT_GOAL_CONFLICT",
   /** 413: リクエストボディが64KiBを超えた（実装仕様書 7章）。 */
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   /** 501: 後続フェーズで実装する骨格（実装仕様書 5.1節の削除フロー）。 */
@@ -101,3 +113,48 @@ export const accountServiceUnavailable = () =>
 
 export const notImplemented = (message: string) =>
   apiError(API_ERROR_CODES.NOT_IMPLEMENTED, message, 501);
+
+/* 身体測定（実装仕様書 5.3節）。詳細は docs/api/measurements.md のエラーコード一覧。 */
+
+export const measurementUnitNotAllowed = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_UNIT_NOT_ALLOWED,
+    "この測定種別では指定した単位を使用できません。",
+    400,
+  );
+
+export const measurementTypeNotFound = () =>
+  apiError(API_ERROR_CODES.MEASUREMENT_TYPE_NOT_FOUND, "測定種別が見つかりません。", 404);
+
+/**
+ * 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
+ * 「行が存在しない場合と版番号が古い場合を区別せず 409 にする」。
+ * 他利用者の行の存在有無を漏らさないため、文言でも区別しない。
+ */
+export const measurementConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_CONFLICT,
+    "測定記録が他の操作で更新されています。最新の内容を取得してからやり直してください。",
+    409,
+  );
+
+export const measurementDuplicateConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_DUPLICATE_CONFLICT,
+    "同じ測定種別・日時の記録が既に存在します。",
+    409,
+  );
+
+export const measurementTypeConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_CONFLICT,
+    "同じ項目キーの測定種別が既に存在します。",
+    409,
+  );
+
+export const measurementGoalConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_GOAL_CONFLICT,
+    "この測定種別には未達成の目標が既に存在します。既存の目標を更新してください。",
+    409,
+  );
