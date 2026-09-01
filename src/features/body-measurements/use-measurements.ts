@@ -119,6 +119,8 @@ export function useMeasurements() {
   const [selectedTypeId, setSelectedTypeId] = useState<string | null>(null);
   const [editingMeasurement, setEditingMeasurement] = useState<Measurement | null>(null);
   const [editingGoal, setEditingGoal] = useState<MeasurementGoal | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const activeTypes = useMemo(
     () =>
@@ -145,7 +147,7 @@ export function useMeasurements() {
       order,
       limit: 100,
       ...(filterTypeId !== "all" ? { typeId: filterTypeId } : {}),
-      ...(from ? { from: new Date(from).toISOString() } : {}),
+      ...(from ? { from: new Date(`${from}T00:00:00.000`).toISOString() } : {}),
       ...(to ? { to: new Date(`${to}T23:59:59.999`).toISOString() } : {}),
     }),
     [filterTypeId, from, order, to],
@@ -173,6 +175,7 @@ export function useMeasurements() {
     }
 
     setMeasurements(result.data.measurements);
+    setNextCursor(result.data.page.nextCursor);
     setTypes(result.data.types);
     setContext(result.data.context);
 
@@ -188,6 +191,7 @@ export function useMeasurements() {
         const reload = await listMeasurements(listQuery);
         if (reload.ok) {
           setMeasurements(reload.data.measurements);
+          setNextCursor(reload.data.page.nextCursor);
           setTypes(reload.data.types);
           setContext(reload.data.context);
         }
@@ -205,6 +209,26 @@ export function useMeasurements() {
   }, [load]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const loadMore = useCallback(async () => {
+    if (!nextCursor) {
+      return false;
+    }
+    setIsLoadingMore(true);
+    const result = await listMeasurements({ ...listQuery, cursor: nextCursor });
+    setIsLoadingMore(false);
+    if (!result.ok) {
+      if (result.status === 401) {
+        window.location.href = "/auth?next=/measurements";
+        return false;
+      }
+      setError(result.error.message);
+      return false;
+    }
+    setMeasurements((prev) => [...prev, ...result.data.measurements]);
+    setNextCursor(result.data.page.nextCursor);
+    return true;
+  }, [listQuery, nextCursor]);
+
   const handleMutationError = useCallback(
     async (
       apiError: ApiError,
@@ -221,10 +245,19 @@ export function useMeasurements() {
       }
 
       // 競合時は最新状態を再取得して提示する（実装仕様書 6.4節、C1/C2）。
-      const [measurementsResult, goalsResult] = await Promise.all([
-        listMeasurements({ order: "desc", limit: 100 }),
-        listGoals({ includeAchieved: true }),
-      ]);
+      // アクティブなフィルタに合わせて再取得し、編集対象が含まれない場合は
+      // フィルタを解除して再取得する（CR-1 / SF-1）。
+      let measurementsResult = await listMeasurements({ ...listQuery, cursor: undefined });
+      const goalsResult = await listGoals({ includeAchieved: true });
+
+      if (
+        measurementsResult.ok &&
+        options.kind === "measurement" &&
+        options.id &&
+        !measurementsResult.data.measurements.some((m) => m.id === options.id)
+      ) {
+        measurementsResult = await listMeasurements({ order: "desc", limit: 500 });
+      }
 
       if (!measurementsResult.ok || !goalsResult.ok) {
         if (!measurementsResult.ok) {
@@ -239,6 +272,7 @@ export function useMeasurements() {
       }
 
       setMeasurements(measurementsResult.data.measurements);
+      setNextCursor(measurementsResult.data.page.nextCursor);
       setTypes(measurementsResult.data.types);
       setContext(measurementsResult.data.context);
       setGoals(goalsResult.data.goals);
@@ -272,7 +306,7 @@ export function useMeasurements() {
         target,
       });
     },
-    [],
+    [listQuery],
   );
 
   const saveMeasurementRecord = useCallback(
@@ -487,6 +521,9 @@ export function useMeasurements() {
     setEditingMeasurement,
     editingGoal,
     setEditingGoal,
+    nextCursor,
+    isLoadingMore,
+    loadMore,
     load,
     saveMeasurementRecord,
     removeMeasurement,

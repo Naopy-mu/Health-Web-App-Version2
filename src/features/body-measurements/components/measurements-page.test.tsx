@@ -451,4 +451,74 @@ describe("MeasurementsPage", () => {
 
     await waitFor(() => expect(screen.getByText("60kg")).toBeInTheDocument());
   });
+
+  it("409 後、編集対象がフィルタ結果に含まれなくても再取得で rowVersion を更新し再試行できる（CR-1）", async () => {
+    const oldMeasurement = makeMeasurement({
+      id: "11111111-1111-1111-1111-111111111111",
+      measuredAt: "2020-01-01T00:00:00.000Z",
+      value: 60,
+      rowVersion: 1,
+    });
+    const latestMeasurement = makeMeasurement({
+      id: "22222222-2222-2222-2222-222222222222",
+      measuredAt: "2026-08-27T07:30:00.000Z",
+      value: 62.4,
+      rowVersion: 1,
+    });
+    const refreshedOld = { ...oldMeasurement, value: 60.5, rowVersion: 2 };
+    const updatedOld = { ...oldMeasurement, value: 61, rowVersion: 3 };
+
+    vi.mocked(api.listMeasurements)
+      .mockResolvedValueOnce(
+        ok(makeListResponse([latestMeasurement, oldMeasurement], [WEIGHT_TYPE])),
+      )
+      .mockResolvedValueOnce(ok(makeListResponse([oldMeasurement], [WEIGHT_TYPE])))
+      .mockResolvedValueOnce(ok(makeListResponse([oldMeasurement], [WEIGHT_TYPE])))
+      .mockResolvedValueOnce(ok(makeListResponse([latestMeasurement, refreshedOld], [WEIGHT_TYPE])))
+      .mockResolvedValueOnce(ok(makeListResponse([latestMeasurement, updatedOld], [WEIGHT_TYPE])));
+    vi.mocked(api.listGoals).mockResolvedValue(ok(makeGoalsResponse()));
+    vi.mocked(api.saveMeasurement)
+      .mockResolvedValueOnce(err("MEASUREMENT_CONFLICT", "他の利用者が更新しました。", 409))
+      .mockResolvedValueOnce(
+        ok({ measurement: updatedOld, outcome: "updated" as const, derivedBmi: null }),
+      );
+
+    render(<MeasurementsPage />);
+    await waitFor(() => expect(screen.getByText("60kg")).toBeInTheDocument());
+
+    // 日付フィルタで古い記録のみ表示
+    fireEvent.change(screen.getByLabelText("開始日"), { target: { value: "2020-01-01" } });
+    fireEvent.change(screen.getByLabelText("終了日"), { target: { value: "2020-01-01" } });
+    await waitFor(() => expect(screen.queryByText("62.4kg")).not.toBeInTheDocument());
+
+    // 古い記録を編集
+    fireEvent.click(screen.getByRole("button", { name: "編集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "記録を編集" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByLabelText("単位")).toHaveValue("kg"));
+
+    const valueInput = screen.getByLabelText("値") as HTMLInputElement;
+    fireEvent.change(valueInput, { target: { value: "61" } });
+    await waitFor(() => expect(valueInput).toHaveValue(61));
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => alert.textContent?.includes("他の画面や操作でデータが更新されました")),
+      ).toBe(true),
+    );
+
+    // 再試行（rowVersion が最新化されているため成功する）
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() => expect(screen.getByText("61kg")).toBeInTheDocument());
+    expect(api.saveMeasurement).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        measurement: expect.objectContaining({ expectedRowVersion: 2 }),
+      }),
+    );
+  });
 });

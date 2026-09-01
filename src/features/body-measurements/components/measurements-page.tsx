@@ -52,6 +52,9 @@ export function MeasurementsPage() {
     setEditingMeasurement,
     editingGoal,
     setEditingGoal,
+    nextCursor,
+    isLoadingMore,
+    loadMore,
     saveMeasurementRecord,
     removeMeasurement,
     addCustomType,
@@ -278,8 +281,8 @@ export function MeasurementsPage() {
             </section>
 
             {conflict ? (
-              <div ref={conflictRef}>
-                <ConflictBanner conflict={conflict} />
+              <div>
+                <ConflictBanner ref={conflictRef} conflict={conflict} />
                 {conflict.target?.kind === "measurement" ? (
                   <p className={`${styles.status} ${styles.statusInfo}`} role="status">
                     サーバーの最新値:{" "}
@@ -339,6 +342,18 @@ export function MeasurementsPage() {
                 onDelete={handleDeleteMeasurement}
                 disabled={isSubmitting}
               />
+              {nextCursor ? (
+                <div className={styles.loadMore}>
+                  <button
+                    className={`${styles.button} ${styles.buttonSecondary}`}
+                    type="button"
+                    onClick={() => void loadMore()}
+                    disabled={isSubmitting || isLoadingMore}
+                  >
+                    {isLoadingMore ? "読み込み中…" : "もっと見る"}
+                  </button>
+                </div>
+              ) : null}
             </section>
           </div>
         ) : null}

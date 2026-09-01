@@ -115,6 +115,9 @@ export function GoalManager({
 
     if (editingGoal) {
       setForm(goalToFormData(editingGoal));
+    } else if (activeTypes.length === 0) {
+      // 種別ロード前は既存の入力を保持し、空フォームへのリセットは行わない（SF-3）。
+      return;
     } else {
       setForm((prev) => {
         if (prev.typeId && prev.unit) {
@@ -122,10 +125,8 @@ export function GoalManager({
           return prev;
         }
         const initial = emptyForm();
-        if (activeTypes[0]) {
-          initial.typeId = activeTypes[0].id;
-          initial.unit = activeTypes[0].defaultUnit;
-        }
+        initial.typeId = activeTypes[0].id;
+        initial.unit = activeTypes[0].defaultUnit;
         return initial;
       });
     }

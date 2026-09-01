@@ -1,3 +1,5 @@
+import { forwardRef } from "react";
+
 import type { ConflictInfo } from "../use-measurements";
 import styles from "../measurements.module.css";
 
@@ -33,16 +35,19 @@ type ConflictBannerProps = {
   conflict: ConflictInfo;
 };
 
-export function ConflictBanner({ conflict }: ConflictBannerProps) {
-  return (
-    <div
-      className={`${styles.status} ${styles.statusError}`}
-      role="alert"
-      tabIndex={-1}
-      aria-live="polite"
-    >
-      <p className={styles.sectionTitle}>{conflictTitle(conflict)}</p>
-      <p>{conflictGuidance(conflict)}</p>
-    </div>
-  );
-}
+export const ConflictBanner = forwardRef<HTMLDivElement, ConflictBannerProps>(
+  function ConflictBanner({ conflict }, ref) {
+    return (
+      <div
+        ref={ref}
+        className={`${styles.status} ${styles.statusError}`}
+        role="alert"
+        tabIndex={-1}
+        aria-live="polite"
+      >
+        <p className={styles.sectionTitle}>{conflictTitle(conflict)}</p>
+        <p>{conflictGuidance(conflict)}</p>
+      </div>
+    );
+  },
+);

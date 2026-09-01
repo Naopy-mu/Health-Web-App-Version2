@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 
 /**
  * 身体測定ページの happy-path E2E。
@@ -26,6 +26,46 @@ async function signIn(page: Page): Promise<void> {
   await page.waitForURL("**/measurements");
 }
 
+/**
+ * テストで作成した測定記録をすべて削除する（SF-6）。
+ * ページングで全件取得し、rowVersion を指定して DELETE する。
+ */
+async function cleanupMeasurements(request: APIRequestContext): Promise<void> {
+  if (!EMAIL || !PASSWORD) {
+    return;
+  }
+
+  const all: { id: string; rowVersion: number }[] = [];
+  let cursor: string | undefined;
+  do {
+    const params = new URLSearchParams({ order: "desc", limit: "500" });
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+    const response = await request.get(`/api/measurements?${params.toString()}`);
+    if (!response.ok()) {
+      break;
+    }
+    const json = (await response.json()) as {
+      data: {
+        measurements: { id: string; rowVersion: number }[];
+        page: { nextCursor: string | null };
+      };
+    };
+    all.push(...json.data.measurements);
+    cursor = json.data.page.nextCursor ?? undefined;
+  } while (cursor);
+
+  for (const measurement of all) {
+    await request.delete("/api/measurements", {
+      data: {
+        measurementId: measurement.id,
+        expectedRowVersion: measurement.rowVersion,
+      },
+    });
+  }
+}
+
 test.describe("Measurements happy path", () => {
   // 同じテストアカウントを共有するため、並列実行はしない
   test.describe.configure({ mode: "serial" });
@@ -33,6 +73,10 @@ test.describe("Measurements happy path", () => {
   test.beforeEach(async ({ page }) => {
     await signIn(page);
     await expect(page.getByRole("heading", { name: "身体測定" })).toBeVisible();
+  });
+
+  test.afterEach(async ({ request }) => {
+    await cleanupMeasurements(request);
   });
 
   test("記録を追加・一覧表示・編集・削除できる", async ({ page }) => {
