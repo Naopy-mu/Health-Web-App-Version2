@@ -121,6 +121,27 @@ async function apiPatch<T>(
   }
 }
 
+async function apiDelete<T>(
+  url: string,
+  body: unknown,
+  parser: (data: unknown) => T,
+): Promise<ApiResult<T>> {
+  try {
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      return { ok: false, error: await parseError(response), status: response.status };
+    }
+    const json = (await response.json()) as unknown;
+    return { ok: true, data: parser(json) };
+  } catch {
+    return { ok: false, error: NETWORK_ERROR, status: 0 };
+  }
+}
+
 export async function listMeasurements(
   query: MeasurementListQuery,
 ): Promise<ApiResult<MeasurementListResponse["data"]>> {
@@ -149,7 +170,7 @@ export async function saveMeasurement(
 export async function deleteMeasurement(
   request: DeleteMeasurementRequest,
 ): Promise<ApiResult<DeleteResponse["data"]>> {
-  return apiPost("/api/measurements", request, (json) => deleteResponseSchema.parse(json).data);
+  return apiDelete("/api/measurements", request, (json) => deleteResponseSchema.parse(json).data);
 }
 
 export async function seedDefaultTypes(): Promise<ApiResult<MeasurementTypeResponse["data"]>> {
@@ -207,7 +228,7 @@ export async function saveGoal(
 export async function deleteGoal(
   request: DeleteMeasurementGoalRequest,
 ): Promise<ApiResult<DeleteResponse["data"]>> {
-  return apiPost(
+  return apiDelete(
     "/api/measurements/goals",
     request,
     (json) => deleteResponseSchema.parse(json).data,
