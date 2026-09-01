@@ -8,7 +8,7 @@ import {
   KILOGRAMS_PER_POUND,
 } from "../../src/features/body-measurements/units";
 
-import { asAuthenticated, createMigratedDatabase, expectRejection, signUp } from "./pglite";
+import { asAnon, asAuthenticated, createMigratedDatabase, expectRejection, signUp } from "./pglite";
 
 /**
  * 身体測定のスキーマ契約（実装仕様書 5.3節 / 6.2節 / 6.4節）。
@@ -667,5 +667,231 @@ describe("測定目標の制約 (実装仕様書 5.3節)", () => {
       ),
     );
     expect(message).toContain('unit "percent" is not allowed for unit_constraint "mass"');
+  });
+});
+
+/**
+ * 冪等キーの適用結果の履歴（実装仕様書 5.3節 / 6.4節、migration 20260827000800）。
+ *
+ * 行の `client_mutation_id` は次のミューテーションで上書きされるため、それだけでは
+ * 「2つ前の再送」を適用済みと判定できない。追記専用のログが世代をすべて残す。
+ * リポジトリと合わせた再送契約そのものは `tests/db/body-measurement-idempotency.test.ts`。
+ */
+describe("冪等キーの適用結果ログ (実装仕様書 5.3節 / 6.4節)", () => {
+  let db: PGlite;
+  let owner: string;
+  let stranger: string;
+  let weightTypeId: string;
+  let measurementId: string;
+
+  const mutationIds = [
+    "d0000000-0000-4000-8000-000000000001",
+    "d0000000-0000-4000-8000-000000000002",
+    "d0000000-0000-4000-8000-000000000003",
+  ];
+
+  beforeAll(async () => {
+    db = await createMigratedDatabase();
+    owner = await signUp(db, "mutation-log@example.test");
+    stranger = await signUp(db, "mutation-log-stranger@example.test");
+
+    for (const userId of [owner, stranger]) {
+      await asAuthenticated(db, userId, async () =>
+        db.query("select public.seed_default_body_measurement_types()"),
+      );
+    }
+
+    const types = await db.query<{ id: string }>(
+      "select id from public.body_measurement_types where owner_id = $1 and measurement_key = 'weight'",
+      [owner],
+    );
+    weightTypeId = types.rows[0]?.id ?? "";
+
+    const created = await asAuthenticated(db, owner, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurements
+           (owner_id, type_id, measured_at, value, unit, client_mutation_id)
+         values ($1, $2, timestamptz '2026-08-01T00:00:00Z', 62.4, 'kg', $3) returning id`,
+        [owner, weightTypeId, mutationIds[0]],
+      ),
+    );
+    measurementId = created.rows[0]?.id ?? "";
+
+    for (const mutationId of mutationIds.slice(1)) {
+      await asAuthenticated(db, owner, async () =>
+        db.query(
+          `update public.body_measurements set value = 61, client_mutation_id = $1
+           where id = $2 and owner_id = $3`,
+          [mutationId, measurementId, owner],
+        ),
+      );
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await db?.close();
+  });
+
+  it("ミューテーションのたびに世代を追記する（行は最後のキーしか覚えていない）", async () => {
+    const row = await db.query<{ client_mutation_id: string }>(
+      "select client_mutation_id from public.body_measurements where id = $1",
+      [measurementId],
+    );
+    expect(row.rows[0]?.client_mutation_id).toBe(mutationIds.at(-1));
+
+    const log = await db.query<{
+      client_mutation_id: string;
+      resource: string;
+      operation: string;
+      entity_id: string;
+      row_version: string;
+    }>(
+      `select client_mutation_id, resource, operation, entity_id,
+              snapshot ->> 'row_version' as row_version
+       from public.body_measurement_mutation_log
+       where owner_id = $1 order by created_at, row_version`,
+      [owner],
+    );
+
+    expect(log.rows).toStrictEqual([
+      {
+        client_mutation_id: mutationIds[0],
+        resource: "body_measurements",
+        operation: "insert",
+        entity_id: measurementId,
+        row_version: "1",
+      },
+      {
+        client_mutation_id: mutationIds[1],
+        resource: "body_measurements",
+        operation: "update",
+        entity_id: measurementId,
+        row_version: "2",
+      },
+      {
+        client_mutation_id: mutationIds[2],
+        resource: "body_measurements",
+        operation: "update",
+        entity_id: measurementId,
+        row_version: "3",
+      },
+    ]);
+  });
+
+  it("スナップショットが生成列を含む適用直後の行そのものである (実装仕様書 6.3節)", async () => {
+    // AFTER トリガーで撮るため、normalized_value / normalized_unit（生成列）と
+    // 共通トリガーが決める row_version / updated_at が入っている。
+    const { rows } = await db.query<{ snapshot: Record<string, unknown> }>(
+      `select snapshot from public.body_measurement_mutation_log
+       where owner_id = $1 and client_mutation_id = $2`,
+      [owner, mutationIds[0]],
+    );
+
+    expect(rows[0]?.snapshot).toMatchObject({
+      id: measurementId,
+      owner_id: owner,
+      type_id: weightTypeId,
+      value: 62.4,
+      unit: "kg",
+      normalized_value: 62.4,
+      normalized_unit: "kg",
+      row_version: 1,
+      client_mutation_id: mutationIds[0],
+    });
+  });
+
+  it("冪等キーの無いミューテーションは記録しない（seed RPC など）", async () => {
+    await asAuthenticated(db, owner, async () =>
+      db.query(
+        `insert into public.body_measurements (owner_id, type_id, measured_at, value, unit)
+         values ($1, $2, timestamptz '2026-08-05T00:00:00Z', 60, 'kg')`,
+        [owner, weightTypeId],
+      ),
+    );
+
+    const { rows } = await db.query<{ count: string }>(
+      "select count(*)::text as count from public.body_measurement_mutation_log where owner_id = $1",
+      [owner],
+    );
+    // 追記済みの3件のまま増えない。
+    expect(rows[0]?.count).toBe("3");
+  });
+
+  it("同一所有者・同一テーブルの冪等キーは1件だけ（別所有者・別テーブルとは衝突しない）", async () => {
+    const duplicate = await expectRejection(() =>
+      db.query(
+        `insert into public.body_measurements
+           (owner_id, type_id, measured_at, value, unit, client_mutation_id)
+         values ($1, $2, timestamptz '2026-08-09T00:00:00Z', 59, 'kg', $3)`,
+        [owner, weightTypeId, mutationIds[0]],
+      ),
+    );
+    expect(duplicate).toMatch(/duplicate key value/i);
+
+    // 別所有者は同じキーを使える。
+    const strangerType = await db.query<{ id: string }>(
+      "select id from public.body_measurement_types where owner_id = $1 and measurement_key = 'weight'",
+      [stranger],
+    );
+    const reused = await asAuthenticated(db, stranger, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurements
+           (owner_id, type_id, measured_at, value, unit, client_mutation_id)
+         values ($1, $2, timestamptz '2026-08-01T00:00:00Z', 70, 'kg', $3) returning id`,
+        [stranger, strangerType.rows[0]?.id, mutationIds[0]],
+      ),
+    );
+    expect(reused.rows).toHaveLength(1);
+
+    // 別テーブル（目標）でも同じキーを使える。
+    const goal = await asAuthenticated(db, owner, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurement_goals
+           (owner_id, type_id, target_value, unit, client_mutation_id)
+         values ($1, $2, 58, 'kg', $3) returning id`,
+        [owner, weightTypeId, mutationIds[0]],
+      ),
+    );
+    expect(goal.rows).toHaveLength(1);
+  });
+
+  it("authenticated は自分の記録を読めるだけで、書き換えられない", async () => {
+    const own = await asAuthenticated(db, owner, async () =>
+      db.query<{ owner_id: string }>(
+        "select distinct owner_id from public.body_measurement_mutation_log",
+      ),
+    );
+    // 他利用者の記録は RLS で見えない。
+    expect(own.rows.map((row) => row.owner_id)).toStrictEqual([owner]);
+
+    for (const statement of [
+      `insert into public.body_measurement_mutation_log
+         (owner_id, resource, client_mutation_id, entity_id, operation, snapshot)
+       values ($1, 'body_measurements', '00000000-0000-4000-8000-00000000000f', $1, 'update', '{}'::jsonb)`,
+      "update public.body_measurement_mutation_log set snapshot = '{}'::jsonb where owner_id = $1",
+      "delete from public.body_measurement_mutation_log where owner_id = $1",
+    ]) {
+      const message = await expectRejection(() =>
+        asAuthenticated(db, owner, async () => db.query(statement, [owner])),
+      );
+      expect(message, statement).toMatch(/permission denied/i);
+    }
+  });
+
+  it("匿名は記録を読めない", async () => {
+    const message = await expectRejection(() =>
+      asAnon(db, async () => db.query("select * from public.body_measurement_mutation_log")),
+    );
+    expect(message).toMatch(/permission denied/i);
+  });
+
+  it("利用者の削除で記録も CASCADE 削除される (実装仕様書 5.1節)", async () => {
+    await db.query("delete from auth.users where id = $1", [stranger]);
+
+    const { rows } = await db.query<{ count: string }>(
+      "select count(*)::text as count from public.body_measurement_mutation_log where owner_id = $1",
+      [stranger],
+    );
+    expect(rows[0]?.count).toBe("0");
   });
 });

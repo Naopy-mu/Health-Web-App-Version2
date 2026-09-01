@@ -58,6 +58,12 @@ const customRow = {
   updated_at: "2026-08-27T00:00:00+00:00",
 };
 
+/**
+ * 冪等キーの適用結果ログ（`body_measurement_mutation_log`、migration 20260827000800）の
+ * 1件。再送の引き当ては行の現在値ではなくこのログから行う（実装仕様書 5.3節）。
+ */
+const loggedMutation = (snapshot: unknown) => ({ data: { snapshot }, error: null });
+
 const useSupabase = (options: FakeSupabaseOptions = {}) => {
   supabaseState.fake = createFakeSupabase(options);
   return supabaseState.fake;
@@ -198,6 +204,45 @@ describe("カスタム種別の追加（実装仕様書 5.3節）", () => {
     expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
   });
 
+  it("unitConstraint は index も選べる（BMI 専用ではない。docs/api/measurements.md 2.2節）", async () => {
+    // 予約されているのは `bmi` という項目キーだけで、単位制約 `index` は
+    // 無次元の指標を測るカスタム種別からも選べる。
+    const indexRow = {
+      ...customRow,
+      measurement_key: "body_score",
+      display_name: "体スコア",
+      unit_constraint: "index",
+      default_unit: "index",
+    };
+    useSupabase({
+      responses: { "insert:body_measurement_types": [{ data: indexRow, error: null }] },
+    });
+
+    const response = await POST(
+      postRequest({
+        action: "create",
+        type: {
+          measurementKey: "body_score",
+          displayName: "体スコア",
+          unitConstraint: "index",
+          defaultUnit: "index",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const [created] = (await readData(response)).types as {
+      unitConstraint: string;
+      defaultUnit: string;
+      isDefault: boolean;
+    }[];
+    expect(created).toMatchObject({
+      unitConstraint: "index",
+      defaultUnit: "index",
+      isDefault: false,
+    });
+  });
+
   it("既定単位が単位制約に合わなければ 400 MEASUREMENT_UNIT_NOT_ALLOWED", async () => {
     const response = await POST(
       postRequest({
@@ -218,8 +263,8 @@ describe("カスタム種別の追加（実装仕様書 5.3節）", () => {
   it("冪等キーが適用済みなら idempotent_replay を返す", async () => {
     const fake = useSupabase({
       responses: {
-        "select:body_measurement_types": [
-          { data: { ...customRow, client_mutation_id: MUTATION_ID }, error: null },
+        "select:body_measurement_mutation_log": [
+          loggedMutation({ ...customRow, client_mutation_id: MUTATION_ID }),
         ],
       },
     });

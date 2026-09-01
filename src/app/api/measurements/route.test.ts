@@ -121,6 +121,12 @@ const measurementRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/**
+ * 冪等キーの適用結果ログ（`body_measurement_mutation_log`、migration 20260827000800）の
+ * 1件。再送の引き当ては行の現在値ではなくこのログから行う（実装仕様書 5.3節）。
+ */
+const loggedMutation = (snapshot: unknown) => ({ data: { snapshot }, error: null });
+
 const useSupabase = (options: FakeSupabaseOptions = {}) => {
   supabaseState.fake = createFakeSupabase({
     responses: { "select:body_measurement_types": [{ data: typeRows, error: null }] },
@@ -448,9 +454,9 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
     const fake = useSupabase({
       responses: {
         "select:body_measurement_types": [{ data: typeRows, error: null }],
-        // 冪等キーによる事前確認で既存行が見つかる。
-        "select:body_measurements": [
-          { data: measurementRow({ client_mutation_id: MUTATION_ID }), error: null },
+        // 冪等キーによる事前確認で、適用済みのスナップショットが見つかる。
+        "select:body_measurement_mutation_log": [
+          loggedMutation(measurementRow({ client_mutation_id: MUTATION_ID })),
         ],
         "select:user_profiles": [{ data: { settings: {} }, error: null }],
       },
@@ -477,10 +483,12 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
     expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
 
     const lookup = fake.operations.find(
-      (operation) => operation.kind === "select" && operation.table === "body_measurements",
+      (operation) =>
+        operation.kind === "select" && operation.table === "body_measurement_mutation_log",
     );
     expect(lookup?.filters).toStrictEqual([
       { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+      { op: "eq", column: "resource", value: "body_measurements" },
       { op: "eq", column: "client_mutation_id", value: MUTATION_ID },
     ]);
   });
@@ -489,11 +497,11 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
     useSupabase({
       responses: {
         "select:body_measurement_types": [{ data: typeRows, error: null }],
-        "select:body_measurements": [
+        "select:body_measurement_mutation_log": [
           // 事前確認では未適用。
           { data: null, error: null },
           // INSERT 競合後の再読み取りで見つかる。
-          { data: measurementRow({ client_mutation_id: MUTATION_ID }), error: null },
+          loggedMutation(measurementRow({ client_mutation_id: MUTATION_ID })),
         ],
         "insert:body_measurements": [
           {
@@ -609,14 +617,13 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
     useSupabase({
       responses: {
         "select:body_measurement_types": [{ data: typeRows, error: null }],
-        "select:body_measurements": [
+        "select:body_measurement_mutation_log": [
           // 更新前の事前確認では未適用。
           { data: null, error: null },
-          // 0 件更新のあとの再確認で、先着が書いた行が見つかる。
-          {
-            data: measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
-            error: null,
-          },
+          // 0 件更新のあとの再確認で、先着が残したスナップショットが見つかる。
+          loggedMutation(
+            measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
+          ),
         ],
         "update:body_measurements": [{ data: null, error: null }],
         "select:user_profiles": [{ data: { settings: {} }, error: null }],
@@ -653,15 +660,14 @@ describe("保存（実装仕様書 5.3節 / 6.4節）", () => {
           { data: typeRows, error: null },
           { data: typeRows, error: null },
         ],
-        "select:body_measurements": [
+        "select:body_measurement_mutation_log": [
           // 双方の事前確認（まだ誰も適用していない）。
           { data: null, error: null },
           { data: null, error: null },
           // 0 件更新になった側の再確認。
-          {
-            data: measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
-            error: null,
-          },
+          loggedMutation(
+            measurementRow({ row_version: 2, value: 61, client_mutation_id: MUTATION_ID }),
+          ),
         ],
         "update:body_measurements": [
           // 先着だけが 1 件更新できる。

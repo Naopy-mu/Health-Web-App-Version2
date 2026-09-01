@@ -6,15 +6,16 @@ Phase 1「DBスキーマ基盤」で用意した共通ルールをまとめる�
 
 対応する migration:
 
-| ファイル                                                         | 内容                                                                                                     |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `supabase/migrations/20260827000100_owned_table_conventions.sql` | 版番号・冪等性の共通トリガーと取り付け関数（実装仕様書 6.4節）                                           |
-| `supabase/migrations/20260827000200_identity_core.sql`           | `public.users` / `public.user_profiles` / `is_active_user()` / `on_auth_user_created`（6.1・6.2・6.5節） |
-| `supabase/migrations/20260827000300_identity_rls.sql`            | ID・プロフィールの RLS（6.5節・9章）                                                                     |
-| `supabase/migrations/20260827000400_storage_buckets.sql`         | 非公開バケットと Storage ポリシー（6.6節）                                                               |
-| `supabase/migrations/20260827000500_body_measurements.sql`       | 身体測定の3テーブル（5.3節）。**本書のテンプレートを適用した最初の機能テーブル**                         |
-| `supabase/migrations/20260827000600_body_measurements_rls.sql`   | 身体測定の RLS（6.5節・9章）                                                                             |
-| `supabase/migrations/20260827000700_body_measurement_seed.sql`   | `seed_default_body_measurement_types()` RPC（5.3節）                                                     |
+| ファイル                                                               | 内容                                                                                                     |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `supabase/migrations/20260827000100_owned_table_conventions.sql`       | 版番号・冪等性の共通トリガーと取り付け関数（実装仕様書 6.4節）                                           |
+| `supabase/migrations/20260827000200_identity_core.sql`                 | `public.users` / `public.user_profiles` / `is_active_user()` / `on_auth_user_created`（6.1・6.2・6.5節） |
+| `supabase/migrations/20260827000300_identity_rls.sql`                  | ID・プロフィールの RLS（6.5節・9章）                                                                     |
+| `supabase/migrations/20260827000400_storage_buckets.sql`               | 非公開バケットと Storage ポリシー（6.6節）                                                               |
+| `supabase/migrations/20260827000500_body_measurements.sql`             | 身体測定の3テーブル（5.3節）。**本書のテンプレートを適用した最初の機能テーブル**                         |
+| `supabase/migrations/20260827000600_body_measurements_rls.sql`         | 身体測定の RLS（6.5節・9章）                                                                             |
+| `supabase/migrations/20260827000700_body_measurement_seed.sql`         | `seed_default_body_measurement_types()` RPC（5.3節）                                                     |
+| `supabase/migrations/20260827000800_body_measurement_mutation_log.sql` | 冪等キーの適用結果の履歴（5.3節・6.4節）。**追記専用テーブルの例**（本テンプレートの対象外）             |
 
 migration のファイル名は `YYYYMMDDHHMMSS_<snake_case>.sql`。番号は既存の最大値より必ず大きくする。
 
@@ -54,6 +55,11 @@ select public.apply_owned_mutable_table_conventions('public.<table>'::regclass);
 4. `BEFORE INSERT` / `BEFORE UPDATE` の共通トリガーを取り付ける。
 
 > `audit_logs` のような追記専用テーブルは本パターンの対象外（実装仕様書 6.4節）。
+> `public.body_measurement_mutation_log`（migration 20260827000800）がその例で、
+> `row_version` も楽観ロックも持たず、書き手は `SECURITY DEFINER` のトリガーだけ。
+> 冪等キーの適用結果を**履歴として**持ち、何世代前の再送でも同じ成功応答を
+> 返せるようにする（実装仕様書 5.3節。行の `client_mutation_id` は最後の
+> ミューテーションで上書きされるため、それだけでは過去の再送を判定できない）。
 
 ### 1.2 共通トリガーの動作
 
@@ -196,6 +202,32 @@ returning *;
 
 一意性は所有者ごとに閉じているため、別利用者が同じ `client_mutation_id` を
 使っても衝突しない。`client_mutation_id` が NULL の行は何度でも作れる。
+
+### 3.3 更新の再送には「行」ではなく「履歴」を引く
+
+行の `client_mutation_id` は**次のミューテーションで上書きされる**。そのため
+3.2 の読み直し（行を `client_mutation_id` で引く）だけでは、同じ行を続けて
+更新したときに**過去のキーでの再送が「未適用」に見えて 409 になる**。
+
+```
+cmid=A で更新 → row_version=2, client_mutation_id=A
+cmid=B で更新 → row_version=3, client_mutation_id=B   ← A は行から消える
+cmid=A で再送 → 行に A が無い → 期待版番号 2 で UPDATE → 0件 → 409（契約違反）
+```
+
+実装仕様書 5.3節は「同一 `client_mutation_id` の再送は競合状態でも必ず同一の
+成功応答を返す」「409 は実際に異なる内容での競合時のみ」と定めているため、
+**適用結果を履歴として別テーブルへ残し、更新の前に必ずそこを引く**。
+
+身体測定では `public.body_measurement_mutation_log`（migration 20260827000800）が
+その役目を持つ。追記は各テーブルの `AFTER INSERT OR UPDATE` トリガー
+（`SECURITY DEFINER`）が行うので、ミューテーションと同一トランザクションで確定し、
+「行は更新されたが記録が残らない」食い違いが起きない。返すのは適用**当時**の
+スナップショットで、現在の行ではない（再送は「失われた応答の再受信」であり、
+その後に別のミューテーションが進めた版番号を返してはならない）。
+
+後続フェーズで同じ仕組みを全エンティティへ広げるときは、実装仕様書 8.1節の
+`offline_sync_operation_results` がその一般形になる。
 
 ---
 

@@ -63,6 +63,12 @@ const defaultTypeRow = {
   updated_at: "2026-08-01T00:00:00+00:00",
 };
 
+/**
+ * 冪等キーの適用結果ログ（`body_measurement_mutation_log`、migration 20260827000800）の
+ * 1件。再送の引き当ては行の現在値ではなくこのログから行う（実装仕様書 5.3節）。
+ */
+const loggedMutation = (snapshot: unknown) => ({ data: { snapshot }, error: null });
+
 const useSupabase = (options: FakeSupabaseOptions = {}) => {
   supabaseState.fake = createFakeSupabase({
     responses: {
@@ -194,18 +200,16 @@ describe("アーカイブ（実装仕様書 5.3節）", () => {
   it("冪等キーが適用済みなら idempotent_replay を返す", async () => {
     const fake = useSupabase({
       responses: {
-        "select:body_measurement_types": [
-          // 1回目: 種別カタログ
-          { data: [defaultTypeRow, customTypeRow()], error: null },
-          // 2回目: 冪等キーによる事前確認
-          {
-            data: customTypeRow({
+        "select:body_measurement_types": [{ data: [defaultTypeRow, customTypeRow()], error: null }],
+        // 冪等キーによる事前確認は適用結果ログを引く。
+        "select:body_measurement_mutation_log": [
+          loggedMutation(
+            customTypeRow({
               archived_at: "2026-08-27T09:00:00+00:00",
               row_version: 2,
               client_mutation_id: MUTATION_ID,
             }),
-            error: null,
-          },
+          ),
         ],
       },
     });
@@ -224,20 +228,18 @@ describe("アーカイブ（実装仕様書 5.3節）", () => {
   it("同じ冪等キーの同時アーカイブは 409 にならず idempotent_replay になる", async () => {
     useSupabase({
       responses: {
-        "select:body_measurement_types": [
-          // 種別カタログ
-          { data: [defaultTypeRow, customTypeRow()], error: null },
+        "select:body_measurement_types": [{ data: [defaultTypeRow, customTypeRow()], error: null }],
+        "select:body_measurement_mutation_log": [
           // 冪等キーの事前確認（未適用）
           { data: null, error: null },
-          // 0件更新のあとの再確認（先着が書いた行）
-          {
-            data: customTypeRow({
+          // 0件更新のあとの再確認（先着が残したスナップショット）
+          loggedMutation(
+            customTypeRow({
               archived_at: "2026-08-27T09:00:00+00:00",
               row_version: 2,
               client_mutation_id: MUTATION_ID,
             }),
-            error: null,
-          },
+          ),
         ],
         "update:body_measurement_types": [{ data: null, error: null }],
       },

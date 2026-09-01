@@ -10,8 +10,13 @@ import "server-only";
  * 2. **楽観ロック**（実装仕様書 6.4節）。更新・削除は
  *    `id + owner_id + row_version` を WHERE 句に含め、0件を 409 として扱う。
  *    行が無い場合と版番号が古い場合を区別しない（他利用者の行の存在を漏らさない）。
- * 3. **冪等キー**（実装仕様書 6.4節）。`client_mutation_id` が適用済みなら、
+ * 3. **冪等キー**（実装仕様書 5.3節・6.4節）。`client_mutation_id` が適用済みなら、
  *    同じ成功応答（`idempotent_replay`）を返す。再送をエラーにしない。
+ *    適用済みかどうかは行の現在値ではなく、追記専用の
+ *    `body_measurement_mutation_log`（migration 20260827000800）を引いて決める。
+ *    行の `client_mutation_id` は次のミューテーションで上書きされるため、
+ *    それだけでは**何世代か前のキーでの再送**を「未適用」と誤判定してしまう
+ *    （実装仕様書 5.3節「409 は実際に異なる内容での競合時のみ」に反する）。
  * 4. SQL は `@supabase/supabase-js`（パラメータ化されたSDK）と
  *    管理済みDB関数だけで実行する（実装仕様書 9.2節）。
  *
@@ -66,6 +71,12 @@ export const MEASUREMENT_TYPES_TABLE = "body_measurement_types";
 export const MEASUREMENTS_TABLE = "body_measurements";
 export const MEASUREMENT_GOALS_TABLE = "body_measurement_goals";
 
+/**
+ * 冪等キーの適用結果（スナップショット）の追記先。
+ * 書き手は DB トリガーだけで、API は読むだけ（migration 20260827000800）。
+ */
+export const MEASUREMENT_MUTATION_LOG_TABLE = "body_measurement_mutation_log";
+
 export const SEED_DEFAULT_TYPES_RPC = "seed_default_body_measurement_types";
 
 /** PostgreSQL のエラーコード（実装仕様書 6.4節の 409 判定などに使う）。 */
@@ -73,9 +84,6 @@ const PG_UNIQUE_VIOLATION = "23505";
 const PG_FOREIGN_KEY_VIOLATION = "23503";
 const PG_CHECK_VIOLATION = "23514";
 const PG_INSUFFICIENT_PRIVILEGE = "42501";
-
-/** 冪等キーの一意インデックス名（`apply_owned_mutable_table_conventions()` 由来）。 */
-const clientMutationIndex = (table: string) => `${table}_owner_client_mutation_key`;
 
 const DUPLICATE_MEASUREMENT_CONSTRAINT = "body_measurements_owner_type_measured_at_key";
 const DUPLICATE_TYPE_KEY_CONSTRAINT = "body_measurement_types_owner_key_key";
@@ -102,6 +110,48 @@ function mapUnexpectedError(error: PostgrestError): Response {
     return invalidRequest("入力値がこの項目の制約を満たしていません。");
   }
   return invalidRequest("測定データを処理できませんでした。");
+}
+
+/* -------------------------------------------------------------------------- */
+/* 冪等キーの引き当て（実装仕様書 5.3節・6.4節）                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `client_mutation_id` の適用結果を履歴から引く。
+ *
+ * 参照先は行そのものではなく `body_measurement_mutation_log`。行の
+ * `client_mutation_id` は次のミューテーションで上書きされるため、行を引くと
+ * 「2つ前の再送」が未適用に見えて 409 になってしまう（実装仕様書 5.3節違反）。
+ * ログは追記専用なので、**何世代前のキーでも**引き当てられる。
+ *
+ * 返すのは適用**当時**の行のスナップショットで、現在の行ではない。再送は
+ * 「あのときの応答をもう一度受け取る」操作であり、その後の別ミューテーションが
+ * 進めた版番号を返してはならない（実装仕様書 8.1節のキューは応答の
+ * `rowVersion` を次の基準版として使う）。
+ */
+async function findMutationSnapshot<Row>(
+  supabase: SupabaseClient,
+  ownerId: string,
+  resource: string,
+  clientMutationId: string,
+): Promise<GuardResult<Row | null>> {
+  const { data, error } = await supabase
+    .from(MEASUREMENT_MUTATION_LOG_TABLE)
+    .select("snapshot")
+    .eq("owner_id", ownerId)
+    .eq("resource", resource)
+    .eq("client_mutation_id", clientMutationId)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+  if (data === null) {
+    return { ok: true, value: null };
+  }
+
+  const { snapshot } = data as unknown as { snapshot: Row | null };
+  return { ok: true, value: snapshot ?? null };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -209,10 +259,9 @@ export async function createType(
 
   if (error) {
     if (error.code === PG_UNIQUE_VIOLATION) {
-      if (
-        clientMutationId !== undefined &&
-        violates(error, clientMutationIndex(MEASUREMENT_TYPES_TABLE))
-      ) {
+      // 冪等キーの一意制約（行側・ログ側）と項目キーの重複のどちらが先に反応するかは
+      // 決められないため、冪等キーがあるときは必ずログを読み直す（再送をエラーにしない）。
+      if (clientMutationId !== undefined) {
         const replay = await findTypeByClientMutationId(supabase, ownerId, clientMutationId);
         if (replay.ok && replay.value !== null) {
           return { ok: true, value: { type: replay.value, outcome: "idempotent_replay" } };
@@ -309,20 +358,19 @@ async function findTypeByClientMutationId(
   ownerId: string,
   clientMutationId: string,
 ): Promise<GuardResult<MeasurementType | null>> {
-  const { data, error } = await supabase
-    .from(MEASUREMENT_TYPES_TABLE)
-    .select(MEASUREMENT_TYPE_COLUMNS)
-    .eq("owner_id", ownerId)
-    .eq("client_mutation_id", clientMutationId)
-    .maybeSingle();
-
-  if (error) {
-    return { ok: false, response: mapUnexpectedError(error) };
+  const snapshot = await findMutationSnapshot<MeasurementTypeRow>(
+    supabase,
+    ownerId,
+    MEASUREMENT_TYPES_TABLE,
+    clientMutationId,
+  );
+  if (!snapshot.ok) {
+    return snapshot;
   }
 
   return {
     ok: true,
-    value: data === null ? null : toMeasurementType(data as unknown as MeasurementTypeRow),
+    value: snapshot.value === null ? null : toMeasurementType(snapshot.value),
   };
 }
 
@@ -559,21 +607,20 @@ async function findMeasurementByClientMutationId(
   clientMutationId: string,
   catalog: TypeCatalog,
 ): Promise<GuardResult<Measurement | null>> {
-  const { data, error } = await supabase
-    .from(MEASUREMENTS_TABLE)
-    .select(MEASUREMENT_COLUMNS)
-    .eq("owner_id", ownerId)
-    .eq("client_mutation_id", clientMutationId)
-    .maybeSingle();
-
-  if (error) {
-    return { ok: false, response: mapUnexpectedError(error) };
+  const snapshot = await findMutationSnapshot<MeasurementRow>(
+    supabase,
+    ownerId,
+    MEASUREMENTS_TABLE,
+    clientMutationId,
+  );
+  if (!snapshot.ok) {
+    return snapshot;
   }
-  if (data === null) {
+  if (snapshot.value === null) {
     return { ok: true, value: null };
   }
 
-  const row = data as unknown as MeasurementRow;
+  const row = snapshot.value;
   const type = catalog.byId.get(row.type_id);
   return {
     ok: true,
@@ -824,21 +871,20 @@ async function findGoalByClientMutationId(
   clientMutationId: string,
   catalog: TypeCatalog,
 ): Promise<GuardResult<MeasurementGoal | null>> {
-  const { data, error } = await supabase
-    .from(MEASUREMENT_GOALS_TABLE)
-    .select(MEASUREMENT_GOAL_COLUMNS)
-    .eq("owner_id", ownerId)
-    .eq("client_mutation_id", clientMutationId)
-    .maybeSingle();
-
-  if (error) {
-    return { ok: false, response: mapUnexpectedError(error) };
+  const snapshot = await findMutationSnapshot<MeasurementGoalRow>(
+    supabase,
+    ownerId,
+    MEASUREMENT_GOALS_TABLE,
+    clientMutationId,
+  );
+  if (!snapshot.ok) {
+    return snapshot;
   }
-  if (data === null) {
+  if (snapshot.value === null) {
     return { ok: true, value: null };
   }
 
-  const row = data as unknown as MeasurementGoalRow;
+  const row = snapshot.value;
   const type = catalog.byId.get(row.type_id);
   return {
     ok: true,

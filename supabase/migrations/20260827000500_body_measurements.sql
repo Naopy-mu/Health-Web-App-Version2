@@ -394,8 +394,22 @@ declare
     where d.measurement_key = new.measurement_key
   );
 begin
-  -- 既定種別の不変条件を先に見る。カタログ判定より前に置くことで、
-  -- 「既定種別のキーを書き換えようとした」に対して的確な文言を返す。
+  -- 既定種別（is_default = true）の行は seed RPC 以外から一切 UPDATE させない。
+  --
+  -- 実装仕様書 5.3節は「既定種別の**作成・変更**をサーバー側処理に限定する」と定める。
+  -- 列レベル権限（migration 20260827000600）が塞げるのは `is_default` /
+  -- `measurement_key` / `unit_constraint` だけで、authenticated は依然として
+  -- `display_name` / `default_unit` / `sort_order` / `archived_at` /
+  -- `client_mutation_id` の UPDATE 権限を持つ。これらはカスタム種別の編集に必要な
+  -- 権限だが、既定種別の行へ向けると
+  -- `{"display_name":"spoofed label","default_unit":"lb","sort_order":999}` のような
+  -- 既定カタログの改ざんが成立してしまう（BMI・グラフのラベル／単位の偽装）。
+  -- 列単位では「どの行か」を表現できないため、行の判定はここで行う。
+  --
+  -- 個別の列については先に的確な文言を返し（「キーを書き換えようとした」等）、
+  -- 最後に UPDATE そのものを 42501 で拒否する。INSERT 側の
+  -- 「seed RPC 以外から is_default を作れない」と同じ設計
+  -- （トランザクションローカル GUC 以外からの変更は拒否）。
   -- seed RPC はカタログの正本なので、この不変条件から外す（正規化できる）。
   if tg_op = 'UPDATE' and old.is_default and not seeding then
     if new.is_default is distinct from old.is_default then
@@ -417,6 +431,13 @@ begin
       raise exception 'default measurement types cannot be archived'
         using errcode = '23514';
     end if;
+
+    -- 上記に当てはまらない列（display_name / default_unit / sort_order /
+    -- client_mutation_id など）の変更も、既定カタログの正本を崩すため拒否する。
+    -- 既定種別を書き換えられるのは public.seed_default_body_measurement_types() だけ。
+    raise exception
+      'default measurement types can only be modified by public.seed_default_body_measurement_types()'
+      using errcode = '42501';
   end if;
 
   if new.is_default and not in_catalog then

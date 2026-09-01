@@ -77,6 +77,12 @@ const goalRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/**
+ * 冪等キーの適用結果ログ（`body_measurement_mutation_log`、migration 20260827000800）の
+ * 1件。再送の引き当ては行の現在値ではなくこのログから行う（実装仕様書 5.3節）。
+ */
+const loggedMutation = (snapshot: unknown) => ({ data: { snapshot }, error: null });
+
 const useSupabase = (options: FakeSupabaseOptions = {}) => {
   supabaseState.fake = createFakeSupabase({
     responses: { "select:body_measurement_types": [{ data: typeRows, error: null }] },
@@ -252,8 +258,8 @@ describe("保存（実装仕様書 6.4節）", () => {
     const fake = useSupabase({
       responses: {
         "select:body_measurement_types": [{ data: typeRows, error: null }],
-        "select:body_measurement_goals": [
-          { data: goalRow({ client_mutation_id: MUTATION_ID }), error: null },
+        "select:body_measurement_mutation_log": [
+          loggedMutation(goalRow({ client_mutation_id: MUTATION_ID })),
         ],
       },
     });
@@ -274,10 +280,12 @@ describe("保存（実装仕様書 6.4節）", () => {
     expect(fake.operations.some((operation) => operation.kind === "insert")).toBe(false);
 
     const lookup = fake.operations.find(
-      (operation) => operation.kind === "select" && operation.table === "body_measurement_goals",
+      (operation) =>
+        operation.kind === "select" && operation.table === "body_measurement_mutation_log",
     );
     expect(lookup?.filters).toStrictEqual([
       { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+      { op: "eq", column: "resource", value: "body_measurement_goals" },
       { op: "eq", column: "client_mutation_id", value: MUTATION_ID },
     ]);
   });
@@ -290,10 +298,10 @@ describe("保存（実装仕様書 6.4節）", () => {
           { data: typeRows, error: null },
           { data: typeRows, error: null },
         ],
-        "select:body_measurement_goals": [
+        "select:body_measurement_mutation_log": [
           { data: null, error: null },
           { data: null, error: null },
-          { data: goalRow({ row_version: 2, client_mutation_id: MUTATION_ID }), error: null },
+          loggedMutation(goalRow({ row_version: 2, client_mutation_id: MUTATION_ID })),
         ],
         "update:body_measurement_goals": [
           { data: goalRow({ row_version: 2, client_mutation_id: MUTATION_ID }), error: null },

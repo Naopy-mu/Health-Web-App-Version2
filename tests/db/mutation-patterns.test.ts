@@ -33,6 +33,14 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
       },
       { table_name: "body_measurement_goals", column_name: "owner_id", data_type: "uuid" },
       { table_name: "body_measurement_goals", column_name: "row_version", data_type: "bigint" },
+      // 冪等キーの適用結果の履歴（migration 20260827000800）。追記専用テーブルなので
+      // row_version は持たない（本パターンの対象外。docs/database/table-conventions.md）。
+      {
+        table_name: "body_measurement_mutation_log",
+        column_name: "client_mutation_id",
+        data_type: "uuid",
+      },
+      { table_name: "body_measurement_mutation_log", column_name: "owner_id", data_type: "uuid" },
       {
         table_name: "body_measurement_types",
         column_name: "client_mutation_id",

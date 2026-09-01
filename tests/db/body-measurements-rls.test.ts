@@ -244,6 +244,94 @@ describe("身体測定の RLS 分離 (実装仕様書 6.5節 / 9章)", () => {
     expect(stored.rows[0]?.count).toBe("0");
   });
 
+  it("authenticated は is_default=true の行を直接 UPDATE できない (実装仕様書 5.3節)", async () => {
+    // 列レベル権限（migration 20260827000600）は display_name / default_unit /
+    // sort_order / archived_at / client_mutation_id の UPDATE を authenticated へ
+    // 与えている。カスタム種別の編集には要る権限だが、既定種別の行へ向けると
+    // 既定カタログの改ざん（ラベル・単位の偽装）が成立してしまう。
+    // 行の判定は列レベルでは書けないため、トリガーが 42501 で拒否する。
+    const before = await db.query<{
+      display_name: string;
+      default_unit: string;
+      sort_order: number;
+      row_version: string;
+    }>(
+      `select display_name, default_unit, sort_order, row_version::text as row_version
+       from public.body_measurement_types
+       where owner_id = $1 and measurement_key = 'weight'`,
+      [alice],
+    );
+
+    const spoofs = [
+      "display_name = 'spoofed label'",
+      "default_unit = 'lb'",
+      "sort_order = 999",
+      "client_mutation_id = '00000000-0000-4000-8000-0000000000ff'",
+      "display_name = 'spoofed label', default_unit = 'lb', sort_order = 999",
+    ];
+
+    for (const assignment of spoofs) {
+      const message = await expectRejection(() =>
+        asAuthenticated(db, alice, async () =>
+          db.query(
+            `update public.body_measurement_types set ${assignment}
+             where owner_id = $1 and measurement_key = 'weight'`,
+            [alice],
+          ),
+        ),
+      );
+      expect(message, assignment).toContain(
+        "default measurement types can only be modified by public.seed_default_body_measurement_types()",
+      );
+    }
+
+    // 1件も通っていない（版番号も進んでいない）。
+    const after = await db.query<{
+      display_name: string;
+      default_unit: string;
+      sort_order: number;
+      row_version: string;
+    }>(
+      `select display_name, default_unit, sort_order, row_version::text as row_version
+       from public.body_measurement_types
+       where owner_id = $1 and measurement_key = 'weight'`,
+      [alice],
+    );
+    expect(after.rows[0]).toStrictEqual(before.rows[0]);
+    expect(after.rows[0]?.display_name).toBe("体重");
+  });
+
+  it("同じ UPDATE でもカスタム種別なら通る（拒否は既定種別の行だけ）", async () => {
+    const custom = await asAuthenticated(db, alice, async () =>
+      db.query<{ id: string }>(
+        `insert into public.body_measurement_types
+           (owner_id, measurement_key, display_name, unit_constraint, default_unit)
+         values ($1, 'editable_metric', '編集できる', 'custom', 'custom') returning id`,
+        [alice],
+      ),
+    );
+
+    const updated = await asAuthenticated(db, alice, async () =>
+      db.query<{ display_name: string; sort_order: number }>(
+        `update public.body_measurement_types set display_name = '改名', sort_order = 20
+         where id = $1 and owner_id = $2 returning display_name, sort_order`,
+        [custom.rows[0]?.id, alice],
+      ),
+    );
+    expect(updated.rows[0]).toStrictEqual({ display_name: "改名", sort_order: 20 });
+  });
+
+  it("seed RPC は拒否の対象外で、既定種別をカタログへ正規化できる", async () => {
+    // 改ざんは拒否されるが、正規の経路（GUC を立てる SECURITY DEFINER の RPC）は通る。
+    // 既定種別の唯一の書き手であることの確認。
+    const seeded = await asAuthenticated(db, alice, async () =>
+      db.query<{ count: string }>(
+        "select count(*)::text as count from public.seed_default_body_measurement_types()",
+      ),
+    );
+    expect(seeded.rows[0]?.count).toBe("10");
+  });
+
   it("既定カタログのキーはカスタム種別が名乗れない（既定種別の偽装を防ぐ）", async () => {
     // is_default を送らなくても、キーそのものが予約されている。
     // これが無いと「先に custom の weight を作る → seed が読み飛ばす」で偽装できる。
