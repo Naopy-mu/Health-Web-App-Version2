@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { MeasurementGoal, MeasurementType } from "../schema";
 import { isUnitAllowedFor, type MeasurementUnit, UNITS_BY_CONSTRAINT } from "../units";
+import type { ConflictInfo } from "../use-measurements";
+import { ConflictBanner } from "./conflict-banner";
 import { findUnachievedGoal, formatValue, toDateTimeLocalValue } from "../utils";
 import styles from "../measurements.module.css";
 
@@ -42,8 +44,13 @@ function goalToFormData(goal: MeasurementGoal): GoalFormData {
 }
 
 type GoalManagerProps = {
+  /** 全種別（アーカイブ済みも含む）。目標の履歴表示に使う（S4）。 */
+  types: MeasurementType[];
+  /** 有効な種別。新規作成・編集時の選択肢に使う。 */
   activeTypes: MeasurementType[];
   goals: MeasurementGoal[];
+  editingGoal: MeasurementGoal | null;
+  onSetEditingGoal: (goal: MeasurementGoal | null) => void;
   onSave: (input: {
     id?: string;
     expectedRowVersion?: number;
@@ -54,21 +61,25 @@ type GoalManagerProps = {
     targetDate: string | null;
     note: string | null;
     achievedAt: string | null;
-  }) => void;
-  onDelete: (id: string, rowVersion: number) => void;
+  }) => Promise<boolean> | boolean;
+  onDelete: (id: string, rowVersion: number) => Promise<boolean> | boolean;
   disabled: boolean;
   serverError: string | null;
+  conflict?: ConflictInfo | null;
 };
 
 export function GoalManager({
+  types,
   activeTypes,
   goals,
+  editingGoal,
+  onSetEditingGoal,
   onSave,
   onDelete,
   disabled,
   serverError,
+  conflict,
 }: GoalManagerProps) {
-  const [editingGoal, setEditingGoal] = useState<MeasurementGoal | null>(null);
   const [form, setForm] = useState<GoalFormData>(emptyForm);
   const [errors, setErrors] = useState<Partial<Record<keyof GoalFormData, string>>>({});
 
@@ -85,17 +96,38 @@ export function GoalManager({
     [activeTypes, form.typeId],
   );
 
+  const previousEditingId = useRef<string | null>(null);
+  const previousActiveTypeId = useRef<string | null>(null);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    const editingId = editingGoal?.id ?? null;
+    const activeTypeId = activeTypes[0]?.id ?? null;
+    // rowVersion / updatedAt のみが変わった場合（409後の最新化）は
+    // 入力中の内容を保持し、フォームをリセットしない（S1）。
+    const editingIdChanged = editingId !== previousEditingId.current;
+    const activeTypeChanged = activeTypeId !== previousActiveTypeId.current;
+    if (!editingIdChanged && !activeTypeChanged) {
+      return;
+    }
+    previousEditingId.current = editingId;
+    previousActiveTypeId.current = activeTypeId;
+
     if (editingGoal) {
       setForm(goalToFormData(editingGoal));
     } else {
-      const initial = emptyForm();
-      if (activeTypes[0]) {
-        initial.typeId = activeTypes[0].id;
-        initial.unit = activeTypes[0].defaultUnit;
-      }
-      setForm(initial);
+      setForm((prev) => {
+        if (prev.typeId && prev.unit) {
+          // 利用者が既に入力を始めている場合は値を保持する（S1）。
+          return prev;
+        }
+        const initial = emptyForm();
+        if (activeTypes[0]) {
+          initial.typeId = activeTypes[0].id;
+          initial.unit = activeTypes[0].defaultUnit;
+        }
+        return initial;
+      });
     }
     setErrors({});
   }, [editingGoal, activeTypes]);
@@ -150,12 +182,17 @@ export function GoalManager({
     return Object.keys(nextErrors).length === 0;
   };
 
-  const handleSubmit = (event: React.FormEvent) => {
+  const resetForm = () => {
+    onSetEditingGoal(null);
+    setForm(emptyForm());
+  };
+
+  const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!validate()) {
       return;
     }
-    onSave({
+    const ok = await onSave({
       ...(editingGoal ? { id: editingGoal.id, expectedRowVersion: editingGoal.rowVersion } : {}),
       typeId: form.typeId,
       targetValue: Number(form.targetValue),
@@ -165,8 +202,9 @@ export function GoalManager({
       note: form.note.trim() || null,
       achievedAt: form.achievedAt ? new Date(form.achievedAt).toISOString() : null,
     });
-    setEditingGoal(null);
-    setForm(emptyForm());
+    if (ok) {
+      resetForm();
+    }
   };
 
   const groupedGoals = useMemo(() => {
@@ -190,8 +228,9 @@ export function GoalManager({
             {serverError}
           </p>
         ) : null}
+        {conflict ? <ConflictBanner conflict={conflict} /> : null}
 
-        {activeTypes.length === 0 ? (
+        {types.length === 0 ? (
           <p className={styles.empty}>測定種別が登録されていません。</p>
         ) : (
           <div className={styles.tableWrapper}>
@@ -207,12 +246,17 @@ export function GoalManager({
                 </tr>
               </thead>
               <tbody>
-                {activeTypes.map((type) => {
+                {types.map((type) => {
                   const typeGoals = groupedGoals.get(type.id) ?? [];
                   if (typeGoals.length === 0) {
                     return (
                       <tr key={type.id}>
-                        <td>{type.displayName}</td>
+                        <td>
+                          {type.displayName}
+                          {type.archivedAt ? (
+                            <span className={styles.typeDefault}>（アーカイブ済み）</span>
+                          ) : null}
+                        </td>
                         <td colSpan={5} className={styles.empty}>
                           目標がありません
                         </td>
@@ -221,7 +265,12 @@ export function GoalManager({
                   }
                   return typeGoals.map((goal) => (
                     <tr key={goal.id} className={goal.achievedAt ? styles.goalAchieved : undefined}>
-                      <td>{type.displayName}</td>
+                      <td>
+                        {type.displayName}
+                        {type.archivedAt ? (
+                          <span className={styles.typeDefault}>（アーカイブ済み）</span>
+                        ) : null}
+                      </td>
                       <td>{formatValue(goal.targetValue, goal.unit)}</td>
                       <td>{goal.startValue !== null ? goal.startValue : "—"}</td>
                       <td>{goal.targetDate ?? "—"}</td>
@@ -235,7 +284,7 @@ export function GoalManager({
                           <button
                             className={`${styles.button} ${styles.buttonSecondary}`}
                             type="button"
-                            onClick={() => setEditingGoal(goal)}
+                            onClick={() => onSetEditingGoal(goal)}
                             disabled={disabled}
                           >
                             編集
@@ -437,7 +486,7 @@ export function GoalManager({
               <button
                 className={`${styles.button} ${styles.buttonSecondary}`}
                 type="button"
-                onClick={() => setEditingGoal(null)}
+                onClick={() => onSetEditingGoal(null)}
                 disabled={disabled}
               >
                 キャンセル

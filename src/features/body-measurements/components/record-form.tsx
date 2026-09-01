@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { Measurement, MeasurementType } from "../schema";
 import { isUnitAllowedFor, type MeasurementUnit, UNITS_BY_CONSTRAINT } from "../units";
@@ -90,17 +90,38 @@ export function RecordForm({
     [activeTypes, form.typeId],
   );
 
+  const previousEditingId = useRef<string | null>(null);
+  const previousActiveTypeId = useRef<string | null>(null);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    const editingId = editingMeasurement?.id ?? null;
+    const activeTypeId = activeTypes[0]?.id ?? null;
+    // rowVersion / updatedAt のみが変わった場合（409後の最新化）は
+    // 入力中の内容を保持し、フォームをリセットしない（S1）。
+    const editingIdChanged = editingId !== previousEditingId.current;
+    const activeTypeChanged = activeTypeId !== previousActiveTypeId.current;
+    if (!editingIdChanged && !activeTypeChanged) {
+      return;
+    }
+    previousEditingId.current = editingId;
+    previousActiveTypeId.current = activeTypeId;
+
     if (editingMeasurement) {
       setForm(measurementToFormData(editingMeasurement));
     } else {
-      const initial = emptyForm();
-      if (activeTypes[0]) {
-        initial.typeId = activeTypes[0].id;
-        initial.unit = activeTypes[0].defaultUnit;
-      }
-      setForm(initial);
+      setForm((prev) => {
+        if (prev.typeId && prev.unit) {
+          // 利用者が既に入力を始めている場合は値を保持する（S1）。
+          return prev;
+        }
+        const initial = emptyForm();
+        if (activeTypes[0]) {
+          initial.typeId = activeTypes[0].id;
+          initial.unit = activeTypes[0].defaultUnit;
+        }
+        return initial;
+      });
     }
     setFieldErrors({});
   }, [editingMeasurement, activeTypes]);

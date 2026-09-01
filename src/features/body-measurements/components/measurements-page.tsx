@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Measurement } from "../schema";
 import { listMeasurements } from "../api";
@@ -11,6 +11,7 @@ import { RecordForm } from "./record-form";
 import { RecordList } from "./record-list";
 import { TypeManager } from "./type-manager";
 import { GoalManager } from "./goal-manager";
+import { ConflictBanner } from "./conflict-banner";
 import styles from "../measurements.module.css";
 
 const TABS = [
@@ -23,9 +24,9 @@ type TabKey = (typeof TABS)[number]["key"];
 
 export function MeasurementsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("records");
-  const [editingMeasurement, setEditingMeasurement] = useState<Measurement | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
+  const conflictRef = useRef<HTMLDivElement>(null);
 
   const {
     types,
@@ -47,6 +48,10 @@ export function MeasurementsPage() {
     selectedTypeId,
     setSelectedTypeId,
     filteredMeasurements,
+    editingMeasurement,
+    setEditingMeasurement,
+    editingGoal,
+    setEditingGoal,
     saveMeasurementRecord,
     removeMeasurement,
     addCustomType,
@@ -54,6 +59,13 @@ export function MeasurementsPage() {
     saveGoalRecord,
     removeGoal,
   } = useMeasurements();
+
+  // 競合バナー表示時にフォーカスを移動する（S2）。
+  useEffect(() => {
+    if (conflict) {
+      conflictRef.current?.focus();
+    }
+  }, [conflict]);
 
   const selectedType = useMemo(
     () => activeTypes.find((type) => type.id === selectedTypeId) ?? activeTypes[0],
@@ -75,7 +87,7 @@ export function MeasurementsPage() {
         setEditingMeasurement(null);
       }
     },
-    [saveMeasurementRecord],
+    [saveMeasurementRecord, setEditingMeasurement],
   );
 
   const handleDeleteMeasurement = useCallback(
@@ -88,12 +100,12 @@ export function MeasurementsPage() {
         setEditingMeasurement(null);
       }
     },
-    [editingMeasurement?.id, removeMeasurement],
+    [editingMeasurement?.id, removeMeasurement, setEditingMeasurement],
   );
 
   const handleCancelEdit = useCallback(() => {
     setEditingMeasurement(null);
-  }, []);
+  }, [setEditingMeasurement]);
 
   const handleExportCsv = useCallback(async () => {
     setCsvLoading(true);
@@ -120,6 +132,23 @@ export function MeasurementsPage() {
     setCsvLoading(false);
   }, []);
 
+  const handleTabKeyDown = useCallback((event: React.KeyboardEvent, index: number) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const nextIndex =
+      event.key === "ArrowLeft"
+        ? (index - 1 + TABS.length) % TABS.length
+        : (index + 1) % TABS.length;
+    setActiveTab(TABS[nextIndex].key);
+    // 次のレンダー後にフォーカスを当てる
+    requestAnimationFrame(() => {
+      const tab = document.getElementById(`measurements-tab-${TABS[nextIndex].key}`);
+      tab?.focus();
+    });
+  }, []);
+
   const isLoading = loadingState !== "idle";
   const isSubmitting = loadingState === "submitting";
 
@@ -140,18 +169,6 @@ export function MeasurementsPage() {
             {error}
           </p>
         ) : null}
-        {conflict ? (
-          <div className={`${styles.status} ${styles.statusError}`} role="alert">
-            <p>{conflict.message}</p>
-            {conflict.latest ? (
-              <p>
-                サーバーの最新値: {formatValue(conflict.latest.value, conflict.latest.unit)} @{" "}
-                {new Date(conflict.latest.measuredAt).toLocaleString()}
-              </p>
-            ) : null}
-            <p>一覧を確認し、必要に応じて再試行してください。</p>
-          </div>
-        ) : null}
         {isLoading && !isSubmitting ? (
           <p className={`${styles.status} ${styles.statusInfo}`} role="status">
             読み込み中…
@@ -159,13 +176,17 @@ export function MeasurementsPage() {
         ) : null}
 
         <div className={styles.tabs} role="tablist" aria-label="身体測定タブ">
-          {TABS.map((tab) => (
+          {TABS.map((tab, index) => (
             <button
               key={tab.key}
+              id={`measurements-tab-${tab.key}`}
               className={styles.tab}
               role="tab"
               aria-selected={activeTab === tab.key}
+              aria-controls={`measurements-panel-${tab.key}`}
+              tabIndex={activeTab === tab.key ? 0 : -1}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
               type="button"
             >
               {tab.label}
@@ -174,7 +195,11 @@ export function MeasurementsPage() {
         </div>
 
         {activeTab === "records" ? (
-          <>
+          <div
+            id="measurements-panel-records"
+            role="tabpanel"
+            aria-labelledby="measurements-tab-records"
+          >
             <section className={styles.card} aria-labelledby="filters-heading">
               <h2 className={styles.sectionTitle} id="filters-heading">
                 フィルタ・並び替え
@@ -252,6 +277,19 @@ export function MeasurementsPage() {
               </div>
             </section>
 
+            {conflict ? (
+              <div ref={conflictRef}>
+                <ConflictBanner conflict={conflict} />
+                {conflict.target?.kind === "measurement" ? (
+                  <p className={`${styles.status} ${styles.statusInfo}`} role="status">
+                    サーバーの最新値:{" "}
+                    {formatValue(conflict.target.data.value, conflict.target.data.unit)} @{" "}
+                    {new Date(conflict.target.data.measuredAt).toLocaleString()}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             <RecordForm
               activeTypes={activeTypes}
               editingMeasurement={editingMeasurement}
@@ -302,29 +340,46 @@ export function MeasurementsPage() {
                 disabled={isSubmitting}
               />
             </section>
-          </>
+          </div>
         ) : null}
 
         {activeTab === "types" ? (
-          <TypeManager
-            activeTypes={activeTypes}
-            archivedTypes={archivedTypes}
-            onCreate={addCustomType}
-            onArchiveToggle={toggleArchiveType}
-            disabled={isSubmitting}
-            serverError={error}
-          />
+          <div
+            id="measurements-panel-types"
+            role="tabpanel"
+            aria-labelledby="measurements-tab-types"
+          >
+            <TypeManager
+              activeTypes={activeTypes}
+              archivedTypes={archivedTypes}
+              onCreate={addCustomType}
+              onArchiveToggle={toggleArchiveType}
+              disabled={isSubmitting}
+              serverError={error}
+              conflict={conflict}
+            />
+          </div>
         ) : null}
 
         {activeTab === "goals" ? (
-          <GoalManager
-            activeTypes={activeTypes}
-            goals={goals}
-            onSave={saveGoalRecord}
-            onDelete={removeGoal}
-            disabled={isSubmitting}
-            serverError={error}
-          />
+          <div
+            id="measurements-panel-goals"
+            role="tabpanel"
+            aria-labelledby="measurements-tab-goals"
+          >
+            <GoalManager
+              types={types}
+              activeTypes={activeTypes}
+              goals={goals}
+              editingGoal={editingGoal}
+              onSetEditingGoal={setEditingGoal}
+              onSave={saveGoalRecord}
+              onDelete={removeGoal}
+              disabled={isSubmitting}
+              serverError={error}
+              conflict={conflict}
+            />
+          </div>
         ) : null}
       </div>
     </main>

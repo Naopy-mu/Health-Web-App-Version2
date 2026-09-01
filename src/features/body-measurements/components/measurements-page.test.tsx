@@ -27,7 +27,7 @@ vi.mock("../api", async () => {
 });
 
 const WEIGHT_TYPE: MeasurementType = {
-  id: "00000000-0000-0000-0000-000000000001",
+  id: "80df8359-7c51-4bd0-8dfa-e0bb4294a431",
   measurementKey: "weight",
   displayName: "体重",
   unitConstraint: "mass",
@@ -42,7 +42,7 @@ const WEIGHT_TYPE: MeasurementType = {
 };
 
 const ARCHIVED_TYPE: MeasurementType = {
-  id: "00000000-0000-0000-0000-000000000002",
+  id: "ee166b66-eb6d-464e-8b0e-ec9c8b3ab8e9",
   measurementKey: "archived_foo",
   displayName: "アーカイブ済み",
   unitConstraint: "custom",
@@ -57,7 +57,7 @@ const ARCHIVED_TYPE: MeasurementType = {
 };
 
 const CUSTOM_TYPE: MeasurementType = {
-  id: "00000000-0000-0000-0000-000000000003",
+  id: "0d6d4309-46bf-4edf-8308-a390bdaf72cf",
   measurementKey: "grip_strength",
   displayName: "握力",
   unitConstraint: "custom",
@@ -73,7 +73,7 @@ const CUSTOM_TYPE: MeasurementType = {
 
 function makeMeasurement(overrides: Partial<Measurement> = {}): Measurement {
   return {
-    id: "00000000-0000-0000-0000-000000000010",
+    id: "4b70adc2-ee96-472a-8851-44173c94fae4",
     typeId: WEIGHT_TYPE.id,
     measurementKey: "weight",
     displayName: "体重",
@@ -125,7 +125,7 @@ function err(
 }
 
 beforeAll(() => {
-  vi.stubGlobal("crypto", { randomUUID: () => "00000000-0000-0000-0000-000000000000" });
+  vi.stubGlobal("crypto", { randomUUID: () => "0ed6f568-e1cd-42c5-889e-358a00748f21" });
   class ResizeObserverMock {
     observe = vi.fn();
     unobserve = vi.fn();
@@ -161,7 +161,7 @@ describe("MeasurementsPage", () => {
 
   it("新規記録を追加できる", async () => {
     const saved = makeMeasurement({
-      id: "00000000-0000-0000-0000-000000000011",
+      id: "0ed6f568-e1cd-42c5-889e-358a00748f21",
       value: 63,
       measuredAt: "2026-08-28T07:30:00.000Z",
       rowVersion: 1,
@@ -257,9 +257,122 @@ describe("MeasurementsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "更新する" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("他の利用者が更新しました"),
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => alert.textContent?.includes("他の画面や操作でデータが更新されました")),
+      ).toBe(true),
     );
     await waitFor(() => expect(screen.getByText("65kg")).toBeInTheDocument());
+  });
+
+  it("409 後に rowVersion を最新化して再試行すると成功する（C1）", async () => {
+    const measurement = makeMeasurement();
+    const updated = makeMeasurement({ value: 61, rowVersion: 2 });
+    vi.mocked(api.listMeasurements)
+      .mockResolvedValueOnce(ok(makeListResponse([measurement])))
+      .mockResolvedValueOnce(ok(makeListResponse([makeMeasurement({ rowVersion: 2 })])))
+      .mockResolvedValueOnce(ok(makeListResponse([updated])));
+    vi.mocked(api.listGoals).mockResolvedValue(ok(makeGoalsResponse()));
+    vi.mocked(api.saveMeasurement)
+      .mockResolvedValueOnce(err("MEASUREMENT_CONFLICT", "他の利用者が更新しました。", 409))
+      .mockResolvedValueOnce(
+        ok({ measurement: updated, outcome: "updated" as const, derivedBmi: null }),
+      );
+
+    render(<MeasurementsPage />);
+    await waitFor(() => expect(screen.getByText("62.4kg")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "編集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "記録を編集" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByLabelText("単位")).toHaveValue("kg"));
+
+    const valueInput = screen.getByLabelText("値") as HTMLInputElement;
+    fireEvent.change(valueInput, { target: { value: "61" } });
+    await waitFor(() => expect(valueInput).toHaveValue(61));
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => alert.textContent?.includes("他の画面や操作でデータが更新されました")),
+      ).toBe(true),
+    );
+
+    // 2 回目の更新で再試行（expectedRowVersion は最新の 2 を使う）
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() => expect(screen.getByText("61kg")).toBeInTheDocument());
+    expect(api.saveMeasurement).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        measurement: expect.objectContaining({ expectedRowVersion: 2 }),
+      }),
+    );
+  });
+
+  it("目標の 409 後も goals を再取得して再試行できる（C2）", async () => {
+    const goal: MeasurementGoal = {
+      id: "0d6d4309-46bf-4edf-8308-a390bdaf72cf",
+      typeId: WEIGHT_TYPE.id,
+      measurementKey: "weight",
+      displayName: "体重",
+      targetValue: 60,
+      unit: "kg",
+      startValue: null,
+      targetDate: null,
+      note: null,
+      achievedAt: null,
+      rowVersion: 1,
+      clientMutationId: null,
+      createdAt: "2026-08-27T00:00:00.000Z",
+      updatedAt: "2026-08-27T00:00:00.000Z",
+    };
+    const updated = { ...goal, targetValue: 58, rowVersion: 2 };
+    vi.mocked(api.listMeasurements).mockResolvedValue(ok(makeListResponse([], [WEIGHT_TYPE])));
+    vi.mocked(api.listGoals)
+      .mockResolvedValueOnce(ok(makeGoalsResponse([goal])))
+      .mockResolvedValueOnce(ok(makeGoalsResponse([{ ...goal, rowVersion: 2 }])))
+      .mockResolvedValueOnce(ok(makeGoalsResponse([updated])));
+    vi.mocked(api.saveGoal)
+      .mockResolvedValueOnce(err("MEASUREMENT_CONFLICT", "他の利用者が更新しました。", 409))
+      .mockResolvedValueOnce(ok({ goal: updated, outcome: "updated" as const }));
+
+    render(<MeasurementsPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "目標" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "新規目標" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "編集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "目標を編集" })).toBeInTheDocument(),
+    );
+
+    const targetInput = screen.getByLabelText("目標値") as HTMLInputElement;
+    fireEvent.change(targetInput, { target: { value: "58" } });
+    await waitFor(() => expect(targetInput).toHaveValue(58));
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => alert.textContent?.includes("他の画面や操作でデータが更新されました")),
+      ).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() => expect(screen.getByText("58kg")).toBeInTheDocument());
+    expect(api.saveGoal).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        goal: expect.objectContaining({ expectedRowVersion: 2 }),
+      }),
+    );
   });
 
   it("アーカイブ済みの種別は種別フィルタに表示されない", async () => {
@@ -298,7 +411,7 @@ describe("MeasurementsPage", () => {
 
   it("目標を追加できる", async () => {
     const goal: MeasurementGoal = {
-      id: "00000000-0000-0000-0000-000000000020",
+      id: "0d6d4309-46bf-4edf-8308-a390bdaf72cf",
       typeId: WEIGHT_TYPE.id,
       measurementKey: "weight",
       displayName: "体重",

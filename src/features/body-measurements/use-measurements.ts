@@ -3,6 +3,8 @@
  *
  * 楽観ロック競合（409）が発生した場合は、サーバー側の最新値を提示して
  * 再試行を促すための情報を状態に保持する（実装仕様書 6.4節）。
+ * 目標・種別の競合でも同様に再取得し、編集中の行の rowVersion だけを
+ * 最新化して入力内容を保持する（C1/C2/S1）。
  */
 
 "use client";
@@ -36,9 +38,18 @@ import { findUnachievedGoal, generateUuid, sortMeasurementsByDate } from "./util
 
 type LoadingState = "idle" | "loading" | "submitting";
 
+type ConflictKind = "measurement" | "goal" | "type";
+
 export type ConflictInfo = {
+  /** 身体測定APIのエラーコード。 */
+  code: string;
+  /** サーバーから返されたメッセージ。 */
   message: string;
-  latest?: Measurement;
+  /** 競合対象の最新値（あれば）。 */
+  target?:
+    | { kind: "measurement"; data: Measurement }
+    | { kind: "goal"; data: MeasurementGoal }
+    | { kind: "type"; data: MeasurementType };
 };
 
 export type UseMeasurementsState = {
@@ -59,6 +70,8 @@ export type UseMeasurementsState = {
   from: string;
   to: string;
   selectedTypeId: string | null;
+  editingMeasurement: Measurement | null;
+  editingGoal: MeasurementGoal | null;
 };
 
 const EMPTY_CONTEXT: UseMeasurementsState["context"] = {
@@ -77,6 +90,20 @@ function isConflictError(error: ApiError | undefined): boolean {
   );
 }
 
+/**
+ * 編集中の行の rowVersion / updatedAt だけを最新化し、
+ * 入力中の内容は保持する（S1）。
+ */
+function refreshRowVersion<T extends { id: string; rowVersion: number; updatedAt: string }>(
+  current: T | null,
+  latest: T | undefined,
+): T | null {
+  if (!current || !latest || current.id !== latest.id) {
+    return current;
+  }
+  return { ...current, rowVersion: latest.rowVersion, updatedAt: latest.updatedAt };
+}
+
 export function useMeasurements() {
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [types, setTypes] = useState<MeasurementType[]>([]);
@@ -90,6 +117,8 @@ export function useMeasurements() {
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
   const [selectedTypeId, setSelectedTypeId] = useState<string | null>(null);
+  const [editingMeasurement, setEditingMeasurement] = useState<Measurement | null>(null);
+  const [editingGoal, setEditingGoal] = useState<MeasurementGoal | null>(null);
 
   const activeTypes = useMemo(
     () =>
@@ -111,33 +140,28 @@ export function useMeasurements() {
     [types],
   );
 
+  const listQuery: MeasurementListQuery = useMemo(
+    () => ({
+      order,
+      limit: 100,
+      ...(filterTypeId !== "all" ? { typeId: filterTypeId } : {}),
+      ...(from ? { from: new Date(from).toISOString() } : {}),
+      ...(to ? { to: new Date(`${to}T23:59:59.999`).toISOString() } : {}),
+    }),
+    [filterTypeId, from, order, to],
+  );
+
   const filteredMeasurements = useMemo(() => {
-    let result = [...measurements];
-    if (filterTypeId !== "all") {
-      result = result.filter((m) => m.typeId === filterTypeId);
-    }
-    if (from) {
-      const fromTime = new Date(from).getTime();
-      result = result.filter((m) => new Date(m.measuredAt).getTime() >= fromTime);
-    }
-    if (to) {
-      const toTime = new Date(to).getTime();
-      result = result.filter((m) => new Date(m.measuredAt).getTime() <= toTime);
-    }
-    return sortMeasurementsByDate(result, order);
-  }, [measurements, filterTypeId, from, to, order]);
+    // API側でフィルタ済みの一覧をそのまま並べ替える（S3）。
+    return sortMeasurementsByDate(measurements, order);
+  }, [measurements, order]);
 
   const load = useCallback(async () => {
     setLoadingState((prev) => (prev === "submitting" ? "submitting" : "loading"));
     setError(null);
     setConflict(null);
 
-    const query: MeasurementListQuery = {
-      order,
-      limit: 100,
-    };
-
-    const result = await listMeasurements(query);
+    const result = await listMeasurements(listQuery);
     if (!result.ok) {
       setLoadingState("idle");
       if (result.status === 401) {
@@ -161,7 +185,7 @@ export function useMeasurements() {
       const seedResult = await seedDefaultTypes();
       if (seedResult.ok) {
         // 既定種別投入後に再取得
-        const reload = await listMeasurements(query);
+        const reload = await listMeasurements(listQuery);
         if (reload.ok) {
           setMeasurements(reload.data.measurements);
           setTypes(reload.data.types);
@@ -173,7 +197,7 @@ export function useMeasurements() {
     }
 
     setLoadingState("idle");
-  }, [order]);
+  }, [listQuery]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -182,29 +206,71 @@ export function useMeasurements() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleMutationError = useCallback(
-    async (apiError: ApiError, status: number, currentId?: string) => {
+    async (
+      apiError: ApiError,
+      status: number,
+      options: { kind: ConflictKind; id?: string } = { kind: "measurement" },
+    ) => {
       if (status === 401) {
         window.location.href = "/auth?next=/measurements";
         return;
       }
-      if (isConflictError(apiError)) {
-        // 競合時は最新状態を再取得して提示する（実装仕様書 6.4節）
-        const latestResult = await listMeasurements({ order: "desc", limit: 100 });
-        if (latestResult.ok) {
-          setMeasurements(latestResult.data.measurements);
-          setTypes(latestResult.data.types);
-          setContext(latestResult.data.context);
-          const latestMeasurement = currentId
-            ? latestResult.data.measurements.find((m) => m.id === currentId)
-            : undefined;
-          setConflict({
-            message: apiError.message,
-            latest: latestMeasurement,
-          });
-        }
-      } else {
+      if (!isConflictError(apiError)) {
         setError(apiError.message);
+        return;
       }
+
+      // 競合時は最新状態を再取得して提示する（実装仕様書 6.4節、C1/C2）。
+      const [measurementsResult, goalsResult] = await Promise.all([
+        listMeasurements({ order: "desc", limit: 100 }),
+        listGoals({ includeAchieved: true }),
+      ]);
+
+      if (!measurementsResult.ok || !goalsResult.ok) {
+        if (!measurementsResult.ok) {
+          setError(measurementsResult.error.message);
+        } else if (!goalsResult.ok) {
+          setError(goalsResult.error.message);
+        } else {
+          setError("再取得中にエラーが発生しました。");
+        }
+        setLoadingState("idle");
+        return;
+      }
+
+      setMeasurements(measurementsResult.data.measurements);
+      setTypes(measurementsResult.data.types);
+      setContext(measurementsResult.data.context);
+      setGoals(goalsResult.data.goals);
+
+      let target: ConflictInfo["target"] = undefined;
+
+      if (options.id) {
+        if (options.kind === "measurement") {
+          const latest = measurementsResult.data.measurements.find((m) => m.id === options.id);
+          if (latest) {
+            target = { kind: "measurement", data: latest };
+            setEditingMeasurement((prev) => refreshRowVersion(prev, latest));
+          }
+        } else if (options.kind === "goal") {
+          const latest = goalsResult.data.goals.find((g) => g.id === options.id);
+          if (latest) {
+            target = { kind: "goal", data: latest };
+            setEditingGoal((prev) => refreshRowVersion(prev, latest));
+          }
+        } else if (options.kind === "type") {
+          const latest = measurementsResult.data.types.find((t) => t.id === options.id);
+          if (latest) {
+            target = { kind: "type", data: latest };
+          }
+        }
+      }
+
+      setConflict({
+        code: apiError.code,
+        message: apiError.message,
+        target,
+      });
     },
     [],
   );
@@ -237,7 +303,10 @@ export function useMeasurements() {
 
       const result = await saveMeasurement(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, input.id);
+        await handleMutationError(result.error, result.status, {
+          kind: "measurement",
+          id: input.id,
+        });
         setLoadingState("idle");
         return false;
       }
@@ -261,7 +330,7 @@ export function useMeasurements() {
       };
       const result = await deleteMeasurement(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, id);
+        await handleMutationError(result.error, result.status, { kind: "measurement", id });
         setLoadingState("idle");
         return false;
       }
@@ -291,7 +360,7 @@ export function useMeasurements() {
         type,
       });
       if (!result.ok) {
-        await handleMutationError(result.error, result.status);
+        await handleMutationError(result.error, result.status, { kind: "type" });
         setLoadingState("idle");
         return false;
       }
@@ -316,7 +385,7 @@ export function useMeasurements() {
       };
       const result = await archiveMeasurementType(type.id, request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, type.id);
+        await handleMutationError(result.error, result.status, { kind: "type", id: type.id });
         setLoadingState("idle");
         return false;
       }
@@ -355,7 +424,7 @@ export function useMeasurements() {
 
       const result = await saveGoal(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, input.id);
+        await handleMutationError(result.error, result.status, { kind: "goal", id: input.id });
         setLoadingState("idle");
         return false;
       }
@@ -376,7 +445,7 @@ export function useMeasurements() {
       const request: DeleteMeasurementGoalRequest = { goalId: id, expectedRowVersion: rowVersion };
       const result = await deleteGoal(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, id);
+        await handleMutationError(result.error, result.status, { kind: "goal", id });
         setLoadingState("idle");
         return false;
       }
@@ -414,6 +483,10 @@ export function useMeasurements() {
     selectedTypeId,
     setSelectedTypeId,
     filteredMeasurements,
+    editingMeasurement,
+    setEditingMeasurement,
+    editingGoal,
+    setEditingGoal,
     load,
     saveMeasurementRecord,
     removeMeasurement,

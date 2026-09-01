@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -22,8 +23,30 @@ type MeasurementChartProps = {
   goals: MeasurementGoal[];
 };
 
+function getInitialReducedMotion(): boolean {
+  if (typeof window === "undefined" || !("matchMedia" in window)) {
+    return false;
+  }
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(getInitialReducedMotion);
+  useEffect(() => {
+    if (typeof window === "undefined" || !("matchMedia" in window)) {
+      return;
+    }
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handler = (event: MediaQueryListEvent) => setReduced(event.matches);
+    media.addEventListener("change", handler);
+    return () => media.removeEventListener("change", handler);
+  }, []);
+  return reduced;
+}
+
 export function MeasurementChart({ measurements, selectedType, goals }: MeasurementChartProps) {
   const chartData = movingAverage(measurements, 7);
+  const reducedMotion = usePrefersReducedMotion();
   const goal = selectedType
     ? goals.find((g) => g.typeId === selectedType.id && g.achievedAt === null)
     : undefined;
@@ -68,15 +91,17 @@ export function MeasurementChart({ measurements, selectedType, goals }: Measurem
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 5 }}
+                  isAnimationActive={!reducedMotion}
                 />
                 <Line
                   type="monotone"
                   dataKey="average"
-                  name="7日移動平均"
+                  name="直近7件平均"
                   stroke="#2563eb"
                   strokeWidth={2}
                   dot={false}
                   connectNulls
+                  isAnimationActive={!reducedMotion}
                 />
                 {goal && goalNormalized !== undefined ? (
                   <ReferenceLine
@@ -97,7 +122,7 @@ export function MeasurementChart({ measurements, selectedType, goals }: Measurem
                 <tr>
                   <th scope="col">日時</th>
                   <th scope="col">測定値</th>
-                  <th scope="col">7日移動平均</th>
+                  <th scope="col">直近7件平均</th>
                 </tr>
               </thead>
               <tbody>

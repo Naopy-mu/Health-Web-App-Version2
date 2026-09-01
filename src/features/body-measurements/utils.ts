@@ -90,15 +90,13 @@ export function escapeCsvValue(value: string | number | null | undefined): strin
   if (value === null || value === undefined) {
     return "";
   }
-  const text = String(value);
+
+  const raw = String(value);
   // 数式インジェクション対策（実装仕様書 9.2節）
-  const needsQuotePrefix = /^[=+\-@]/.test(text);
-  const needsQuoting = needsQuotePrefix || /[",\n\r]/.test(text);
-  const safe = text.replace(/"/g, '""');
-  if (needsQuoting) {
-    return needsQuotePrefix ? `'"${safe}"` : `"${safe}"`;
-  }
-  return safe;
+  // サーバー側実装（src/server/account/export.ts）と同じ形式にする:
+  // 先頭が = + - @ \t \r の値には引用符の内側に ' を前置し、全体を二重引用符で囲む。
+  const formulaLeading = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return `"${formulaLeading.replaceAll('"', '""')}"`;
 }
 
 export function buildMeasurementsCsv(measurements: Measurement[]): string {

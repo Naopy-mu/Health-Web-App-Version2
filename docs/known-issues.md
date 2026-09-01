@@ -26,6 +26,22 @@
 - 所有者接続が RLS を迂回すること（`FORCE ROW LEVEL SECURITY` を付けない限り所有者には
   ポリシーが適用されない）に起因する見かけ上の成功
 
+## Phase 3b（身体測定フロントエンド）備忘録
+
+Phase 3b のレビュー指摘（C1〜C4 / S1〜S10）はすべて対応済み。以下は**対応に伴い判明した開発環境・実行手順上の注意**であり、実装仕様書の要求自体は満たしている。
+
+| #     | 項目                                                                       | 現状・対応                                                                                                                                                                                                                                                                                | 該当箇所・コマンド                                                |
+| ----- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| P3b-1 | E2E は production ビルドで実行する                                         | `next dev` では React Fast Refresh が CSP の `script-src` に `'unsafe-eval'` を要求し、ブラウザコンソールで `EvalError` が発生してクライアントが初期化できない。CSP は実装仕様書 9.1 節と一字一句同一のため、開発時のみ緩和せず、**`npm run build && npm run start`** で E2E を実行する。 | `e2e/measurements.spec.ts`、Next.js 公式ドキュメント              |
+| P3b-2 | Playwright の baseURL は `localhost` を明示する                            | Playwright 既定の baseURL は `http://127.0.0.1:3000`。Windows 環境で `localhost` が IPv6 (`::1`) に解決されるケースがあり、`127.0.0.1` では接続できないことがある。実行時に `PLAYWRIGHT_BASE_URL=http://localhost:3000` を設定する。                                                      | `playwright.config.ts`、`e2e/README.md`                           |
+| P3b-3 | Windows PowerShell では `npm` コマンドが Execution Policy でブロックされる | `npm` の PowerShell スクリプト (`npm.ps1`) が Execution Policy で実行できない。回避策として **`node --run <script>`** を使用する。または `npm.cmd` を直接呼び出す。                                                                                                                       | `package.json`、CI 用 PowerShell スクリプト                       |
+| P3b-4 | `/api/health` は未実装                                                     | 死活監視用エンドポイント `/api/health` は現在未実装。ローカルではルート `/` への接続でサーバー起動を確認する。                                                                                                                                                                            | `src/app/api/health/route.ts`（未作成）                           |
+| P3b-5 | Recharts `ResponsiveContainer` のテスト時警告                              | テスト環境ではコンテナの幅・高さが 0 のため、`ResponsiveContainer` がコンソール警告を出す。これは表示上の警告であり、テスト結果には影響しない。実ブラウザ・production ビルドでは発生しない。                                                                                              | `src/features/body-measurements/components/measurement-chart.tsx` |
+| P3b-6 | 複数タブ E2E での自動更新限界                                              | 身体測定データは別ブラウザタブ間で自動同期されない。409 競合シナリオでは、pageA で更新後に **pageB を `reload()` して最新状態を取得する**必要がある。これはアプリの仕様であり、リアルタイム更新は後続フェーズで検討する。                                                                 | `e2e/measurements.spec.ts`                                        |
+| P3b-7 | `happy-dom` の `URL` コンストラクタ制限                                    | `downloadCsv` のユニットテストでは、`URL.createObjectURL` / `revokeObjectURL` を stub し、anchor click をモック化している。`happy-dom` 上の `URL` 実装が blob URL に対応していないため、実際のダウンロード動作は E2E または手動で検証する。                                               | `src/features/body-measurements/utils.test.ts`                    |
+| P3b-8 | Zod v4 の UUID バリデーション                                              | Zod v4 の `z.uuid()` は **v4 UUID のみ**を許可する。テスト fixture や E2E で使用する ID は必ず v4 形式にする。ランダムな 16 進文字列はスキーマ検証で落ちる。                                                                                                                              | `src/features/body-measurements/schema.ts`                        |
+| P3b-9 | PowerShell `Start-Process` での `ChildProcess.kill` ログ                   | バックグラウンドで Next.js サーバーを起動する際、`Start-Process` が即座に制御を返すため、bash ツール上に `ChildProcess.kill` のようなログが出力されることがある。プロセスは継続して動作しており、影響はない。                                                                             | ローカル開発用 PowerShell 操作                                    |
+
 ## Phase 2（認証・アカウント基盤）バックログ
 
 Phase 2 のスコープは「認証・アカウント基盤」であり、以下は**対象となるデータ・機能が

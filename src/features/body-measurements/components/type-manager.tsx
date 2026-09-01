@@ -6,6 +6,8 @@ import type { MeasurementType } from "../schema";
 import { isDefaultMeasurementKey } from "../defaults";
 import { MEASUREMENT_KEY_PATTERN } from "../schema";
 import { isUnitAllowedFor, UNITS_BY_CONSTRAINT } from "../units";
+import type { ConflictInfo } from "../use-measurements";
+import { ConflictBanner } from "./conflict-banner";
 import styles from "../measurements.module.css";
 
 type TypeManagerProps = {
@@ -17,10 +19,11 @@ type TypeManagerProps = {
     unitConstraint: MeasurementType["unitConstraint"];
     defaultUnit: MeasurementType["defaultUnit"];
     sortOrder?: number;
-  }) => void;
-  onArchiveToggle: (type: MeasurementType, archived: boolean) => void;
+  }) => Promise<boolean> | boolean;
+  onArchiveToggle: (type: MeasurementType, archived: boolean) => Promise<boolean> | boolean;
   disabled: boolean;
   serverError: string | null;
+  conflict?: ConflictInfo | null;
 };
 
 const CONSTRAINT_OPTIONS: { value: MeasurementType["unitConstraint"]; label: string }[] = [
@@ -38,6 +41,7 @@ export function TypeManager({
   onArchiveToggle,
   disabled,
   serverError,
+  conflict,
 }: TypeManagerProps) {
   const [measurementKey, setMeasurementKey] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -81,24 +85,30 @@ export function TypeManager({
     return Object.keys(nextErrors).length === 0;
   };
 
-  const handleSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!validate()) {
-      return;
-    }
-    onCreate({
-      measurementKey,
-      displayName: displayName.trim(),
-      unitConstraint,
-      defaultUnit,
-      sortOrder: sortOrder.trim() ? Number(sortOrder) : undefined,
-    });
+  const resetForm = () => {
     setMeasurementKey("");
     setDisplayName("");
     setUnitConstraint("custom");
     setDefaultUnit("custom");
     setSortOrder("");
     setErrors({});
+  };
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!validate()) {
+      return;
+    }
+    const ok = await onCreate({
+      measurementKey,
+      displayName: displayName.trim(),
+      unitConstraint,
+      defaultUnit,
+      sortOrder: sortOrder.trim() ? Number(sortOrder) : undefined,
+    });
+    if (ok) {
+      resetForm();
+    }
   };
 
   return (
@@ -112,6 +122,7 @@ export function TypeManager({
             {serverError}
           </p>
         ) : null}
+        {conflict ? <ConflictBanner conflict={conflict} /> : null}
         <div className={styles.tableWrapper}>
           <table className={styles.table}>
             <thead>
