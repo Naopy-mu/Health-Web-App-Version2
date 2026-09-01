@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 
+import { MobileNavigation } from "@/components/mobile-navigation";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <a href="#main-content">本文へ移動</a>
         {children}
+        <MobileNavigation />
       </body>
     </html>
   );
