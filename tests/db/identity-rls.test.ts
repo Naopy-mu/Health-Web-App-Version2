@@ -169,9 +169,17 @@ describe("users / user_profiles の RLS 分離 (実装仕様書 6.5節 / 9章)",
 
     expect(rows).toStrictEqual([
       { routine_name: "apply_owned_mutable_table_conventions", anon: false, authenticated: false },
+      // 身体測定（実装仕様書 5.3節）。カタログと単位判定は authenticated から
+      // 参照する必要があるため EXECUTE を与え、トリガー関数には与えない。
+      { routine_name: "body_measurement_unit_is_allowed", anon: false, authenticated: true },
+      { routine_name: "default_body_measurement_types", anon: false, authenticated: true },
       { routine_name: "handle_new_auth_user", anon: false, authenticated: false },
       { routine_name: "is_active_user", anon: false, authenticated: true },
+      { routine_name: "seed_default_body_measurement_types", anon: false, authenticated: true },
       { routine_name: "storage_object_path_is_owned", anon: false, authenticated: true },
+      { routine_name: "tg_body_measurement_record_mutation", anon: false, authenticated: false },
+      { routine_name: "tg_body_measurement_type_guard", anon: false, authenticated: false },
+      { routine_name: "tg_body_measurement_unit_matches_type", anon: false, authenticated: false },
       { routine_name: "tg_owned_mutable_before_insert", anon: false, authenticated: false },
       { routine_name: "tg_owned_mutable_before_update", anon: false, authenticated: false },
     ]);

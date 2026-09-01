@@ -26,6 +26,31 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
     );
 
     expect(rows).toStrictEqual([
+      {
+        table_name: "body_measurement_goals",
+        column_name: "client_mutation_id",
+        data_type: "uuid",
+      },
+      { table_name: "body_measurement_goals", column_name: "owner_id", data_type: "uuid" },
+      { table_name: "body_measurement_goals", column_name: "row_version", data_type: "bigint" },
+      // 冪等キーの適用結果の履歴（migration 20260827000800）。追記専用テーブルなので
+      // row_version は持たない（本パターンの対象外。docs/database/table-conventions.md）。
+      {
+        table_name: "body_measurement_mutation_log",
+        column_name: "client_mutation_id",
+        data_type: "uuid",
+      },
+      { table_name: "body_measurement_mutation_log", column_name: "owner_id", data_type: "uuid" },
+      {
+        table_name: "body_measurement_types",
+        column_name: "client_mutation_id",
+        data_type: "uuid",
+      },
+      { table_name: "body_measurement_types", column_name: "owner_id", data_type: "uuid" },
+      { table_name: "body_measurement_types", column_name: "row_version", data_type: "bigint" },
+      { table_name: "body_measurements", column_name: "client_mutation_id", data_type: "uuid" },
+      { table_name: "body_measurements", column_name: "owner_id", data_type: "uuid" },
+      { table_name: "body_measurements", column_name: "row_version", data_type: "bigint" },
       { table_name: "user_profiles", column_name: "client_mutation_id", data_type: "uuid" },
       { table_name: "user_profiles", column_name: "owner_id", data_type: "uuid" },
       { table_name: "user_profiles", column_name: "row_version", data_type: "bigint" },
@@ -42,7 +67,13 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
        order by tablename`,
     );
 
-    expect(rows.map((row) => row.tablename)).toStrictEqual(["user_profiles", "users"]);
+    expect(rows.map((row) => row.tablename)).toStrictEqual([
+      "body_measurement_goals",
+      "body_measurement_types",
+      "body_measurements",
+      "user_profiles",
+      "users",
+    ]);
     for (const row of rows) {
       expect(row.indexdef).toContain("CREATE UNIQUE INDEX");
       expect(row.indexdef).toContain("(owner_id, client_mutation_id)");

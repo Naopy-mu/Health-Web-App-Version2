@@ -35,14 +35,23 @@ describe("supabase/migrations (実装仕様書 6章 / 12章)", () => {
        where table_schema = 'public' order by table_name`,
     );
 
-    expect(rows.map((row) => row.table_name)).toStrictEqual(["user_profiles", "users"]);
+    expect(rows.map((row) => row.table_name)).toStrictEqual([
+      "body_measurement_goals",
+      "body_measurement_mutation_log",
+      "body_measurement_types",
+      "body_measurements",
+      "user_profiles",
+      "users",
+    ]);
   });
 
-  it("本フェーズでは機能テーブルを作らない", async () => {
+  it("未着手のフェーズの機能テーブルはまだ作らない", async () => {
+    // Phase 3a で追加したのは身体測定（実装仕様書 5.3節）の3テーブルと、
+    // その冪等キーの適用結果ログ（6.4節）だけ。
     const { rows } = await db.query<{ count: string }>(
       `select count(*)::text as count from information_schema.tables
        where table_schema = 'public'
-         and table_name in ('body_measurements', 'workout_sessions', 'meal_recipes', 'habits')`,
+         and table_name in ('workout_sessions', 'meal_recipes', 'habits', 'sleep_entries')`,
     );
 
     expect(rows[0]?.count).toBe("0");

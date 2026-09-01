@@ -34,6 +34,22 @@ export const API_ERROR_CODES = {
   JSON_REQUIRED: "JSON_REQUIRED",
   /** 400: JSONとして解釈できない、またはスキーマに合致しない。 */
   INVALID_REQUEST: "INVALID_REQUEST",
+  /** 400: 単位が測定種別の単位制約に合わない（実装仕様書 5.3節）。 */
+  MEASUREMENT_UNIT_NOT_ALLOWED: "MEASUREMENT_UNIT_NOT_ALLOWED",
+  /** 404: 測定種別が所有者スコープに見つからない（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_NOT_FOUND: "MEASUREMENT_TYPE_NOT_FOUND",
+  /** 400: アーカイブ済みの測定種別へ新規登録しようとした（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_ARCHIVED: "MEASUREMENT_TYPE_ARCHIVED",
+  /** 400: 既定カタログで予約された項目キーをカスタム種別に使おうとした（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_KEY_RESERVED: "MEASUREMENT_TYPE_KEY_RESERVED",
+  /** 409: 測定記録の版番号不一致、または対象が存在しない（実装仕様書 6.4節）。 */
+  MEASUREMENT_CONFLICT: "MEASUREMENT_CONFLICT",
+  /** 409: 同一の所有者・種別・日時の重複登録（実装仕様書 5.3節）。 */
+  MEASUREMENT_DUPLICATE_CONFLICT: "MEASUREMENT_DUPLICATE_CONFLICT",
+  /** 409: 測定種別の項目キー重複、または版番号不一致（実装仕様書 5.3節）。 */
+  MEASUREMENT_TYPE_CONFLICT: "MEASUREMENT_TYPE_CONFLICT",
+  /** 409: 未達成の測定目標が既にある、または版番号不一致（実装仕様書 5.3節）。 */
+  MEASUREMENT_GOAL_CONFLICT: "MEASUREMENT_GOAL_CONFLICT",
   /** 413: リクエストボディが64KiBを超えた（実装仕様書 7章）。 */
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   /** 501: 後続フェーズで実装する骨格（実装仕様書 5.1節の削除フロー）。 */
@@ -101,3 +117,74 @@ export const accountServiceUnavailable = () =>
 
 export const notImplemented = (message: string) =>
   apiError(API_ERROR_CODES.NOT_IMPLEMENTED, message, 501);
+
+/* 身体測定（実装仕様書 5.3節）。詳細は docs/api/measurements.md のエラーコード一覧。 */
+
+export const measurementUnitNotAllowed = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_UNIT_NOT_ALLOWED,
+    "この測定種別では指定した単位を使用できません。",
+    400,
+  );
+
+export const measurementTypeNotFound = () =>
+  apiError(API_ERROR_CODES.MEASUREMENT_TYPE_NOT_FOUND, "測定種別が見つかりません。", 404);
+
+/**
+ * 実装仕様書 5.3節:
+ * > アーカイブ済み種別に対する新規の測定記録・目標登録は拒否する。
+ */
+export const measurementTypeArchived = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_ARCHIVED,
+    "アーカイブ済みの測定種別には新しく登録できません。アーカイブを解除してからお試しください。",
+    400,
+  );
+
+/**
+ * 実装仕様書 5.3節: 既定カタログのキーは既定種別（`is_default=true`）専用。
+ * カスタム種別が同じキーを名乗ると既定種別の偽装になるため拒否する。
+ */
+export const measurementTypeKeyReserved = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_KEY_RESERVED,
+    "この項目キーは既定の測定種別で予約されています。別のキーを指定してください。",
+    400,
+  );
+
+/**
+ * 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
+ * 「行が存在しない場合と版番号が古い場合を区別せず 409 にする」。
+ * 他利用者の行の存在有無を漏らさないため、文言でも区別しない。
+ */
+export const measurementConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_CONFLICT,
+    "測定記録が他の操作で更新されています。最新の内容を取得してからやり直してください。",
+    409,
+  );
+
+export const measurementDuplicateConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_DUPLICATE_CONFLICT,
+    "同じ測定種別・日時の記録が既に存在します。",
+    409,
+  );
+
+/**
+ * 項目キーの重複（作成）と版番号不一致・対象なし（アーカイブ更新）の双方で使う。
+ * 実装仕様書 6.4節に従い、行の不在と版番号違いは文言でも区別しない。
+ */
+export const measurementTypeConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_TYPE_CONFLICT,
+    "測定種別を保存できませんでした。同じ項目キーの種別が既にあるか、他の操作で更新されています。",
+    409,
+  );
+
+export const measurementGoalConflict = () =>
+  apiError(
+    API_ERROR_CODES.MEASUREMENT_GOAL_CONFLICT,
+    "この測定種別には未達成の目標が既に存在します。既存の目標を更新してください。",
+    409,
+  );

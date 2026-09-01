@@ -73,3 +73,14 @@ Vitest では `src/tests/server-only.ts` のスタブへ差し替えてクライ
 [`docs/database/table-conventions.md`](docs/database/table-conventions.md) を参照する。
 migration の検証は `npm test`（PGlite、Docker不要）で行う。Docker / Supabase CLI が無い環境で
 検証できず後続フェーズへ送った項目は [`docs/known-issues.md`](docs/known-issues.md) に記録する。
+
+## API 契約
+
+機能ごとのリクエスト／レスポンス仕様は `docs/api/` に置く。
+
+| 機能              | 契約                                                   | 型・スキーマの正本                         |
+| ----------------- | ------------------------------------------------------ | ------------------------------------------ |
+| 身体測定（5.3節） | [`docs/api/measurements.md`](docs/api/measurements.md) | `src/features/body-measurements/schema.ts` |
+
+全 Route Handler に共通の境界（same-origin 検証、`Content-Type` 要求、64KiB 上限、
+`no-store`、`{ error: { code, message } }` 形式）は `src/server/api/` にある。
