@@ -71,7 +71,10 @@ await fetch("/api/wellness", {
 
 ### 1.5 冪等キー（実装仕様書 6.4節 / 8.1節）
 
-- 保存系（`POST`）は任意で `clientMutationId`（UUID v4）を受ける。
+- 保存系（`POST`）は `clientMutationId`（UUID v4）を受ける。
+  **体調記録（`resource: "condition"`）では必須**、それ以外では任意
+  （体調記録は本体と症状リンクをまとめて書くため、応答を受け取れなかったときに
+  「適用済みか未適用か」を判断できるのが冪等キーだけになる。6.2節）。
 - **1つのミューテーションにつき1つの UUID を生成し、再送時も同じ値を使う。**
 - 既に適用済みの `clientMutationId` なら、サーバーは新しい行を作らず
   **同じ成功応答**（`outcome: "idempotent_replay"`、HTTP 200）を返す。
@@ -123,41 +126,70 @@ Phase 3b（身体測定フロントエンド）では、409 のあとに「`limi
 取り直すだけ」では対象行を見失う不具合が繰り返し見つかった。対象が一覧の何ページ目に
 あるか分からないためで、**最新の `rowVersion` を取れないまま再試行できなくなる**。
 
-本 API はこれを設計段階で塞いでいる。DB 側に「所有者 + 記録日時（+ 種別）」の
-一意制約があり、GET はその組み合わせをそのまま絞り込み条件として公開する。
-**下表の条件で GET すれば、件数に関係なく必ず1件に到達できる。**
+**対象特定は行の主キー（`id`）で行う。**
 
-| リソース                | 絞り込み（すべて GET のクエリ）                                      | 対応する DB の一意制約                    |
-| ----------------------- | -------------------------------------------------------------------- | ----------------------------------------- |
-| 睡眠記録                | `resource=sleep&sleepKind=<種別>&from=<sleepAt>&to=<sleepAt>`        | (owner_id, sleep_kind, sleep_at)          |
-| 水分記録                | `resource=hydration&beverageTypeId=<種別>&from=<recordedAt>&to=<同>` | (owner_id, beverage_type_id, recorded_at) |
-| 体調記録                | `resource=condition&from=<recordedAt>&to=<recordedAt>`               | (owner_id, recorded_at)                   |
-| 睡眠の目標 / 水分の目標 | 応答の `sleepGoals` / `hydrationGoals`（全件返る。ページングしない） | (owner_id, start_date)                    |
-| 飲み物種別 / 症状種別   | 応答の `beverageTypes` / `symptomTypes`（全件返る）                  | (owner_id, beverage_key) など             |
+`GET /api/wellness?resource=<種類>&id=<UUID>` は、その1件だけを所有者スコープで
+直接返す。**一覧の `limit` にも、記録日時・種別による絞り込みにも一切依存しない。**
+`id` は行の生存期間中ずっと変わらないので、次の判定がそのまま成立する。
 
-409 からの復帰手順:
+| 結果            | 意味                                                                 |
+| --------------- | -------------------------------------------------------------------- |
+| `entries` に1件 | それが最新の状態。`rowVersion` を取り直して再試行できる              |
+| `entries` が空  | **本当に削除された**（またはもう所有していない）。編集を破棄してよい |
 
-1. 編集開始時に持っていた**永続値**（送信値ではなく、サーバーから受け取った値）で
-   上表の絞り込み GET を投げる。`limit=1` でよい。
-   - 送信値を使うと、利用者が日時や種別を編集していた場合に別の行を指してしまう。
-2. 返ってきた1件の `rowVersion` を `expectedRowVersion` にして再送する。
-3. 0件なら、その行は他の操作で**削除された**。編集を破棄して一覧へ戻す。
+#### 409 からの復帰手順
+
+1. 編集開始時にサーバーから受け取った **`id`**（送信値ではなく永続値）で
+   `GET /api/wellness?resource=<種類>&id=<id>` を投げる。
+2. 1件返れば、その `rowVersion` を `expectedRowVersion` にして再送する。
+3. 0件なら、その行は削除されている。編集を破棄して一覧へ戻す。
 
 ```ts
-// 例: 睡眠記録の 409 から復帰する
-const params = new URLSearchParams({
+import { buildWellnessRefetchQuery, interpretWellnessRefetch } from "@/features/wellness/conflict";
+
+// original は「編集開始時にサーバーから受け取った行」
+const { strategy, params } = buildWellnessRefetchQuery({
   resource: "sleep",
-  sleepKind: original.sleepKind, // 編集開始時の永続値
-  from: original.sleepAt,
-  to: original.sleepAt,
-  limit: "1",
+  id: original.id,
+  sleepKind: original.sleepKind,
+  sleepAt: original.sleepAt,
 });
 const res = await fetch(`/api/wellness?${params}`);
 const { data } = await res.json();
-const latest = data.entries.find((entry) => entry.id === original.id) ?? null;
+
+const outcome = interpretWellnessRefetch(strategy, data.entries);
+// outcome.kind === "found"     → outcome.entry.rowVersion で再試行
+// outcome.kind === "deleted"   → 削除済み（id で引いて0件だったときだけ）
+// outcome.kind === "unresolved"→ 断定できない（一覧を取り直す）
 ```
 
-目標と種別はページングしないので、`GET /api/wellness` の応答に必ず全件が入る。
+`id` は他の絞り込み（`from` / `to` / `cursor` / `sleepKind` / `beverageTypeId`）と
+**併用できない**（併用すると 400）。1件取得が「他の条件に依存しない」ことに意味が
+あるためで、併用を黙って無視すると、呼び出し側が絞り込みが効いていると誤解したまま
+結果を読んでしまう。
+
+#### `id` をまだ持っていないとき（新規作成の重複競合）
+
+新規作成が 409 `WELLNESS_DUPLICATE_CONFLICT` になったときだけは `id` が無い。
+このときは記録日時・種別で引く（下表）。DB 側に対応する一意制約があるので、
+**その識別子を持つ行が今もあれば**必ず1件に到達できる。
+
+| リソース | 絞り込み（すべて GET のクエリ）                                      | 対応する DB の一意制約                    |
+| -------- | -------------------------------------------------------------------- | ----------------------------------------- |
+| 睡眠記録 | `resource=sleep&sleepKind=<種別>&from=<sleepAt>&to=<sleepAt>`        | (owner_id, sleep_kind, sleep_at)          |
+| 水分記録 | `resource=hydration&beverageTypeId=<種別>&from=<recordedAt>&to=<同>` | (owner_id, beverage_type_id, recorded_at) |
+| 体調記録 | `resource=condition&from=<recordedAt>&to=<recordedAt>`               | (owner_id, recorded_at)                   |
+
+> **この方法の0件は「削除された」を意味しない。**
+> 競合した側の更新が**その記録日時・種別そのものを書き換えていた**場合も0件になる
+> （行はまだある）。だから `id` を持っているときは必ず `id` で引くこと。
+> `interpretWellnessRefetch` は識別子で引いた0件を `"unresolved"` として返し、
+> 「削除された」と断定しない。
+
+#### 目標・種別には対象特定クエリが要らない
+
+目標（`sleepGoals` / `hydrationGoals`）と種別（`beverageTypes` / `symptomTypes`）は
+ページングせず、**どの `GET /api/wellness` の応答にも全件入る**。
 一覧から `id` で引き直せばよい（追加のリクエストは要らない）。
 
 ### 1.8 エラーコード一覧
@@ -306,16 +338,21 @@ DB のカタログとの一致は `tests/db/wellness.test.ts` が検証してい
 
 ### クエリパラメータ
 
-| 名前             | 型                                  | 既定    | 内容                                             |
-| ---------------- | ----------------------------------- | ------- | ------------------------------------------------ |
-| `resource`       | `sleep` / `hydration` / `condition` | `sleep` | ページングして返す時系列リソース                 |
-| `from`           | ISO 8601                            | —       | 時間軸 `>= from`（オフセット必須）               |
-| `to`             | ISO 8601                            | —       | 時間軸 `<= to`（オフセット必須）                 |
-| `order`          | `asc` / `desc`                      | `desc`  | 時間軸の並び                                     |
-| `limit`          | 整数 1〜500                         | `100`   | 1ページの件数                                    |
-| `cursor`         | 不透明文字列                        | —       | 前ページの `data.page.nextCursor` をそのまま渡す |
-| `sleepKind`      | `night` / `nap` / `other`           | —       | `resource=sleep` のときだけ指定できる            |
-| `beverageTypeId` | UUID                                | —       | `resource=hydration` のときだけ指定できる        |
+| 名前             | 型                                  | 既定    | 内容                                                   |
+| ---------------- | ----------------------------------- | ------- | ------------------------------------------------------ |
+| `resource`       | `sleep` / `hydration` / `condition` | `sleep` | ページングして返す時系列リソース                       |
+| `id`             | UUID                                | —       | **その1件だけを主キーで直接返す**（1.7節）。単独で使う |
+| `from`           | ISO 8601                            | —       | 時間軸 `>= from`（オフセット必須）                     |
+| `to`             | ISO 8601                            | —       | 時間軸 `<= to`（オフセット必須）                       |
+| `order`          | `asc` / `desc`                      | `desc`  | 時間軸の並び                                           |
+| `limit`          | 整数 1〜500                         | `100`   | 1ページの件数                                          |
+| `cursor`         | 不透明文字列                        | —       | 前ページの `data.page.nextCursor` をそのまま渡す       |
+| `sleepKind`      | `night` / `nap` / `other`           | —       | `resource=sleep` のときだけ指定できる                  |
+| `beverageTypeId` | UUID                                | —       | `resource=hydration` のときだけ指定できる              |
+
+**`id` を指定した取得は主キーの1件取得**（409 後の対象特定。1.7節）。
+応答の形は一覧と同じで、`entries` が0件か1件、`page.nextCursor` は必ず `null` になる。
+`id` は `from` / `to` / `cursor` / `sleepKind` / `beverageTypeId` と併用できない（400）。
 
 **`from` / `to` が比較する列はリソースごとに違う。**
 
@@ -418,7 +455,11 @@ DB のカタログとの一致は `tests/db/wellness.test.ts` が検証してい
 - **4つの日時はすべて必須**。仮眠のように就床＝入眠、起床＝離床の記録は同じ値を入れる
   （`<=` なので通る）。入眠＜起床だけは**厳密**（同時刻は 400）。
 - 就床から離床までが 24 時間を超えると 400。
-- `awakeMinutes` は入眠〜起床の分数**未満**でなければならない（等号も 400）。
+- `awakeMinutes` は**睡眠時間未満**でなければならない（等号も 400）。
+  睡眠時間は `起床 - 入眠 - 覚醒時間` なので、入眠〜起床の総時間を `t`、覚醒時間を `a`
+  とすると `a < t - a`、つまり **`2a < t`** を満たす必要がある。
+  たとえば総時間60分の仮眠なら、覚醒時間は29分までは通り、30分（睡眠時間と同じ）や
+  40分（睡眠20分より長い）は 400 になる。
 
 いずれも 400 `WELLNESS_INVALID_SLEEP_RANGE` で、`message` にどの規則を破ったかが入る。
 DB の CHECK 制約も同じ判定をする（最終防衛線）。
@@ -607,7 +648,7 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 ```jsonc
 {
   "resource": "condition",
-  "clientMutationId": "…", // 任意
+  "clientMutationId": "…", // **必須**（安全な再試行のため。1.5節）
   "entry": {
     "id": "…", // 省略 → 作成 / 指定 → 更新
     "expectedRowVersion": 2, // 更新のときは必須
@@ -637,11 +678,23 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 
 | 状況                                  | 応答                              |
 | ------------------------------------- | --------------------------------- |
+| `clientMutationId` が無い             | 400 `INVALID_REQUEST`             |
 | `symptomTypeId` が所有者の種別に無い  | 404 `WELLNESS_TYPE_NOT_FOUND`     |
 | `symptomTypeId` がアーカイブ済み      | 400 `WELLNESS_TYPE_ARCHIVED`      |
 | 同じ `symptomTypeId` を重複して送った | 400 `INVALID_REQUEST`             |
 | 同じ記録日時の記録が既にある          | 409 `WELLNESS_DUPLICATE_CONFLICT` |
 | 版番号不一致・対象なし                | 409 `WELLNESS_CONFLICT`           |
+
+> **なぜ体調記録だけ `clientMutationId` が必須なのか**
+>
+> 体調記録の保存は「本体の作成／更新」と「症状リンクの全置換」の2つを伴う。
+> どちらか一方だけが確定すると中途半端な状態になるため、DB 関数
+> `save_condition_entry`（migration 20260903000500）が**1トランザクション**で
+> まとめて書く。失敗すれば本体も冪等キーの記録もまとめて巻き戻るので、
+> **同じ `clientMutationId` のまま安全に再送できる**（未適用ならやり直し、
+> 適用済みなら `idempotent_replay`）。
+> キー無しで再送できてしまうと、新規作成では一意制約（所有者・記録日時）に
+> 当たって 409 になり、利用者が自力で復帰できない。
 
 ### 6.3 `symptoms` の扱い（**全置換**）
 
@@ -650,17 +703,16 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 - `symptoms: []` を送ると全解除。
 - `symptoms` を**省略すると既存のリンクをそのまま残す**（1.6節の例外）。
   スコアだけ直したいときは省略すればよい。
-- 置換は DB 側の1トランザクション（`replace_condition_entry_symptoms` RPC）で行うので、
-  「古い症状だけ消えて新しい症状が入らない」中途半端な状態にはならない。
+- **本体の作成／更新と症状の置換は同じトランザクション**（DB 関数
+  `save_condition_entry`、migration 20260903000500）。片方だけが確定することはない。
+  症状の置換に失敗すれば、本体の変更も冪等キーの記録もまとめて巻き戻る。
 
 **再送（`idempotent_replay`）のときの症状の扱い**:
 
 - 応答の**スカラー値（スコア・体温・メモ・`rowVersion`）は適用当時のスナップショット**。
-- 応答の `symptoms` は**その記録の現在のリンク**。症状リンクは親とは別の操作なので、
-  スナップショットには含まれていない。
-- 再送で症状を貼り直すのは、**スナップショットが最新世代のときだけ**。
-  「親は保存できたが症状の置換に失敗した」まま再送されたケースを救うためで、
-  古い世代の再送では触らない（あとから入った症状を巻き戻さないため）。
+- 応答の `symptoms` は**その記録の現在のリンク**（症状リンクは版番号を持たないため）。
+- 再送が症状を書き換えることはない。本体と症状は同時にしか確定しないので、
+  「本体だけ保存できた」状態を救うための貼り直しは要らない。
 
 ---
 
@@ -677,6 +729,10 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 
 どちらも違反すると 409 `WELLNESS_GOAL_CONFLICT`。
 新しい目標を作るときは、先に既存の目標へ `endDate` を入れて締める。
+
+**目標の更新で版番号が合わなかったとき（対象なしを含む）も
+409 `WELLNESS_GOAL_CONFLICT`**。記録用の `WELLNESS_CONFLICT` は返らないので、
+画面は目標の競合をこのコード1つで扱えばよい。
 
 ### 7.1 `SleepGoal` の応答形
 
@@ -751,6 +807,9 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 （水分は `"resource": "hydration_goal"`、キーは同じく `goal`）
 
 `endDate` が `startDate` より前なら 400 `INVALID_REQUEST`。
+版番号不一致・対象なし・開始日の重複・終了日の無い目標の重複は、いずれも
+409 `WELLNESS_GOAL_CONFLICT`。復帰は 1.7節（応答の `sleepGoals` /
+`hydrationGoals` に全件入るので、`id` で引き直す）。
 
 ---
 
@@ -819,6 +878,10 @@ DB のトリガーが seed 以外からの書き込みを拒否する（実装�
 失敗: 項目キー重複 → 409 `WELLNESS_TYPE_CONFLICT`、
 既定カタログの予約キー → 400 `WELLNESS_TYPE_KEY_RESERVED`（2.3節）、
 カスタム症状30件超 → 400 `WELLNESS_TYPE_LIMIT_REACHED`。
+
+> **30件の上限はアーカイブ済みを数えない。** エラー文言が案内するとおり、
+> 不要なカスタム症状を `archived: true` にすれば枠が空いて新しい症状を追加できる
+> （既定13種は別枠で、この上限には関係しない）。
 
 ### 8.3 種別の更新・アーカイブ／解除
 
@@ -894,6 +957,13 @@ DB のトリガーが seed 以外からの書き込みを拒否する（実装�
 | `WEEKDAYS` / `WEEKDAY_LABELS`                          | 曜日（0=日）と日本語1文字ラベル                        |
 | `roundTo(value, digits)`                               | 二進小数の誤差に強い丸め                               |
 
+409 からの復帰は `src/features/wellness/conflict.ts` にまとめてある（1.7節）。
+
+| 関数                                          | 内容                                                          |
+| --------------------------------------------- | ------------------------------------------------------------- |
+| `buildWellnessRefetchQuery(target)`           | 対象特定クエリを組み立てる。`id` があれば必ず主キー取得を選ぶ |
+| `interpretWellnessRefetch(strategy, entries)` | 0件の意味を判定する（`found` / `deleted` / `unresolved`）     |
+
 既定カタログ側（`defaults.ts`）にも同じ用途の値がある。
 
 | 値・関数                                                 | 内容                                     |
@@ -934,12 +1004,12 @@ DB のトリガーが seed 以外からの書き込みを拒否する（実装�
 
 ## 13. 検証状況
 
-| 対象                                                                                                           | テスト                                  |
-| -------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| migration の新規適用、共通テンプレートの取り付け、制約、生成列、seed RPC、既定種別保護、冪等キーの適用結果ログ | `tests/db/wellness.test.ts`             |
-| RLS 分離、匿名拒否、非active排除、複合外部キー、CASCADE、種別カタログの DELETE 不可                            | `tests/db/wellness-rls.test.ts`         |
-| 何世代前の冪等キーでも同一の成功応答／同時多重送信／重複登録防止／**409 後の対象特定クエリ**                   | `tests/db/wellness-idempotency.test.ts` |
-| 睡眠時間・水分正規化・睡眠効率・順序判定・曜日判定                                                             | `src/features/wellness/units.test.ts`   |
-| 入力スキーマ（`.strict()`・値域・必須条件）                                                                    | `src/features/wellness/schema.test.ts`  |
-| 共通境界・楽観ロック・冪等キー・重複防止・ページング・リソース分岐・種別保護                                   | `src/app/api/wellness/route.test.ts`    |
-| 所有者フィールドの拒否                                                                                         | `src/server/api/owner-fields.test.ts`   |
+| 対象                                                                                                                                                                                                   | テスト                                  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
+| migration の新規適用、共通テンプレートの取り付け、制約、生成列、seed RPC、既定種別保護、冪等キーの適用結果ログ                                                                                         | `tests/db/wellness.test.ts`             |
+| RLS 分離、匿名拒否、非active排除、複合外部キー、CASCADE、種別カタログの DELETE 不可                                                                                                                    | `tests/db/wellness-rls.test.ts`         |
+| 何世代前の冪等キーでも同一の成功応答／同時多重送信／重複登録防止／**id による 409 後の対象特定（651件規模・識別子が変わった競合更新・削除との区別）**／体調記録の保存が1トランザクションで巻き戻ること | `tests/db/wellness-idempotency.test.ts` |
+| 睡眠時間・水分正規化・睡眠効率・順序判定・曜日判定                                                                                                                                                     | `src/features/wellness/units.test.ts`   |
+| 入力スキーマ（`.strict()`・値域・必須条件）                                                                                                                                                            | `src/features/wellness/schema.test.ts`  |
+| 共通境界・楽観ロック・冪等キー・重複防止・ページング・リソース分岐・種別保護                                                                                                                           | `src/app/api/wellness/route.test.ts`    |
+| 所有者フィールドの拒否                                                                                                                                                                                 | `src/server/api/owner-fields.test.ts`   |

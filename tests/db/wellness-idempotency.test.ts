@@ -3,9 +3,12 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { buildWellnessRefetchQuery, interpretWellnessRefetch } from "@/features/wellness/conflict";
 import { wellnessListQuerySchema } from "@/features/wellness/schema";
 import {
   deleteWellnessRow,
+  getConditionEntryById,
+  getSleepEntryById,
   listConditionEntries,
   listHydrationEntries,
   listSleepEntries,
@@ -58,6 +61,16 @@ async function expectError(
 }
 
 const query = (overrides: Record<string, string> = {}) => wellnessListQuerySchema.parse(overrides);
+
+/**
+ * 体調記録の保存は `clientMutationId` が必須（migration 20260903000500 /
+ * `docs/api/wellness.md` 6.2節）。テストごとに重複しないキーを配る。
+ */
+let conditionKeySeed = 0;
+const conditionKey = (): string => {
+  conditionKeySeed += 1;
+  return `dddd0001-0000-4000-8000-${String(conditionKeySeed).padStart(12, "0")}`;
+};
 
 describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装仕様書 5.5節 / 6.4節)", () => {
   let db: PGlite;
@@ -487,7 +500,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
         supabase,
         userId,
         { recordedAt, overallScore: 7 },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -498,7 +511,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           supabase,
           userId,
           { recordedAt: `2026-02-2${index}T08:00:00.000Z` },
-          undefined,
+          conditionKey(),
           catalog,
         ),
       );
@@ -509,7 +522,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
         supabase,
         userId,
         { recordedAt, id: created.entry.id, expectedRowVersion: 1, overallScore: 8 },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -534,6 +547,211 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
   });
 
   /* ------------------------------------------------------------------ */
+  /* 識別子そのものが競合更新で変わった場合の対象特定                    */
+  /*                                                                     */
+  /* 記録日時・種別による絞り込みは「その識別子がまだ同じ」ことを前提に  */
+  /* している。競合した側の更新がその識別子自体を書き換えていると0件に   */
+  /* なり、行が残っているのに「削除された」と誤判定してしまう。          */
+  /* 主キー（id）は行の生存期間中ずっと変わらないので前提が要らない。    */
+  /* ------------------------------------------------------------------ */
+
+  it("睡眠: 651件規模でも、識別子（種別・入眠日時）を変えた競合更新のあと id で最新へ到達できる", async () => {
+    const bulkUser = await signUp(db, "wellness-pinpoint-sleep@example.test");
+    const bulk = createPglitePostgrest(db, bulkUser);
+
+    // 対象より新しい記録を650件積む（合計651件）。既定の一覧（新しい順）でも
+    // 一覧の最大ページ（500件）でも対象には届かない規模。
+    await db.query(
+      `insert into public.sleep_entries
+         (owner_id, sleep_kind, bed_at, sleep_at, wake_at, out_of_bed_at)
+       select $1, 'night',
+              timestamptz '2027-01-01T22:00:00Z' + (n || ' days')::interval,
+              timestamptz '2027-01-01T22:30:00Z' + (n || ' days')::interval,
+              timestamptz '2027-01-02T06:00:00Z' + (n || ' days')::interval,
+              timestamptz '2027-01-02T06:10:00Z' + (n || ' days')::interval
+       from generate_series(1, 650) as n`,
+      [bulkUser],
+    );
+
+    const original = {
+      sleepKind: "night" as const,
+      bedAt: "2026-12-01T22:00:00.000Z",
+      sleepAt: "2026-12-01T22:30:00.000Z",
+      wakeAt: "2026-12-02T06:00:00.000Z",
+      outOfBedAt: "2026-12-02T06:10:00.000Z",
+    };
+    const created = await expectOk(await saveSleepEntry(bulk, bulkUser, original, undefined));
+
+    const total = await db.query<{ count: string }>(
+      "select count(*)::text as count from public.sleep_entries where owner_id = $1",
+      [bulkUser],
+    );
+    expect(total.rows[0]?.count).toBe("651");
+
+    // 競合した側の更新が、**識別子そのもの**（種別と入眠日時）を書き換える。
+    const moved = await expectOk(
+      await saveSleepEntry(
+        bulk,
+        bulkUser,
+        {
+          ...original,
+          id: created.entry.id,
+          expectedRowVersion: created.entry.rowVersion,
+          sleepKind: "nap",
+          bedAt: "2026-12-01T23:00:00.000Z",
+          sleepAt: "2026-12-01T23:30:00.000Z",
+        },
+        undefined,
+      ),
+    );
+    expect(moved.entry.rowVersion).toBe(2);
+
+    // 編集を続けていた側は古い版番号で 409 になる。
+    const conflict = await expectError(
+      await saveSleepEntry(
+        bulk,
+        bulkUser,
+        { ...original, id: created.entry.id, expectedRowVersion: 1, quality: 3 },
+        undefined,
+      ),
+    );
+    expect(conflict.code).toBe("WELLNESS_CONFLICT");
+
+    // 旧方式（編集開始時の永続値＝種別・入眠日時で絞り込む）は0件になる。
+    // 行はまだあるのに「削除された」と誤判定してしまう型。
+    const byIdentifier = await expectOk(
+      await listSleepEntries(
+        bulk,
+        bulkUser,
+        query({
+          resource: "sleep",
+          sleepKind: original.sleepKind,
+          from: original.sleepAt,
+          to: original.sleepAt,
+          limit: "1",
+        }),
+      ),
+    );
+    expect(byIdentifier.entries).toHaveLength(0);
+
+    // 一覧の最大ページでも対象には届かない（651件のうち最も古い1件）。
+    const widest = await expectOk(
+      await listSleepEntries(bulk, bulkUser, query({ resource: "sleep", limit: "500" })),
+    );
+    expect(widest.entries.some((entry) => entry.id === created.entry.id)).toBe(false);
+
+    // 主キーによる1件取得なら、識別子が変わっていても最新の状態へ到達できる。
+    const byId = await expectOk(await getSleepEntryById(bulk, bulkUser, created.entry.id));
+    expect(byId.entries).toHaveLength(1);
+    expect(byId.entries[0]?.id).toBe(created.entry.id);
+    expect(byId.entries[0]?.rowVersion).toBe(2);
+    expect(byId.entries[0]?.sleepKind).toBe("nap");
+    expect(byId.entries[0]?.sleepAt).toBe("2026-12-01T23:30:00.000Z");
+    expect(byId.nextCursor).toBeNull();
+
+    // 取り直した版番号で再試行すれば 409 から復帰できる。
+    const retried = await expectOk(
+      await saveSleepEntry(
+        bulk,
+        bulkUser,
+        {
+          ...original,
+          id: created.entry.id,
+          expectedRowVersion: byId.entries[0]?.rowVersion ?? 0,
+          sleepKind: "nap",
+          bedAt: "2026-12-01T23:00:00.000Z",
+          sleepAt: "2026-12-01T23:30:00.000Z",
+          quality: 3,
+        },
+        undefined,
+      ),
+    );
+    expect(retried.outcome).toBe("updated");
+    expect(retried.entry.rowVersion).toBe(3);
+
+    // 本当に削除されたときだけ0件になる（「識別子が変わった」場合と区別できる）。
+    await expectOk(await deleteWellnessRow(bulk, bulkUser, "sleep", created.entry.id, undefined));
+    const afterDelete = await expectOk(await getSleepEntryById(bulk, bulkUser, created.entry.id));
+    expect(afterDelete.entries).toHaveLength(0);
+  }, 60_000);
+
+  it("体調: 記録日時を変えた競合更新のあとも id で最新へ到達できる", async () => {
+    const recordedAt = "2026-11-01T08:00:00.000Z";
+    const created = await expectOk(
+      await saveConditionEntry(
+        supabase,
+        userId,
+        { recordedAt, overallScore: 6 },
+        conditionKey(),
+        catalog,
+      ),
+    );
+
+    // 競合した側が記録日時（＝一意制約の識別子）を書き換える。
+    await expectOk(
+      await saveConditionEntry(
+        supabase,
+        userId,
+        {
+          id: created.entry.id,
+          expectedRowVersion: created.entry.rowVersion,
+          recordedAt: "2026-11-01T20:00:00.000Z",
+          overallScore: 9,
+        },
+        conditionKey(),
+        catalog,
+      ),
+    );
+
+    // 編集開始時の記録日時で引くと0件（行は残っているのに見失う）。
+    const byIdentifier = await expectOk(
+      await listConditionEntries(
+        supabase,
+        userId,
+        query({ resource: "condition", from: recordedAt, to: recordedAt, limit: "1" }),
+        catalog,
+      ),
+    );
+    expect(byIdentifier.entries).toHaveLength(0);
+
+    const byId = await expectOk(
+      await getConditionEntryById(supabase, userId, created.entry.id, catalog),
+    );
+    expect(byId.entries).toHaveLength(1);
+    expect(byId.entries[0]?.rowVersion).toBe(2);
+    expect(byId.entries[0]?.overallScore).toBe(9);
+    expect(byId.entries[0]?.recordedAt).toBe("2026-11-01T20:00:00.000Z");
+  });
+
+  it("対象特定クエリは id があれば必ず主キー取得を選ぶ（0件の意味が変わるため）", () => {
+    const withId = buildWellnessRefetchQuery({
+      resource: "sleep",
+      id: "aaaa0002-0000-4000-8000-000000000001",
+      sleepKind: "night",
+      sleepAt: "2026-12-01T22:30:00.000Z",
+    });
+    expect(withId.strategy).toBe("id");
+    expect(withId.params.get("id")).toBe("aaaa0002-0000-4000-8000-000000000001");
+    // 併用すると API が 400 を返すため、絞り込みは載せない。
+    expect(withId.params.get("sleepKind")).toBeNull();
+    expect(withId.params.get("from")).toBeNull();
+
+    // id がまだ無い（新規作成の重複競合）ときだけ識別子で引く。
+    const withoutId = buildWellnessRefetchQuery({
+      resource: "sleep",
+      sleepKind: "night",
+      sleepAt: "2026-12-01T22:30:00.000Z",
+    });
+    expect(withoutId.strategy).toBe("identifier");
+    expect(withoutId.params.get("sleepKind")).toBe("night");
+
+    // 0件の解釈: 主キーなら「削除された」と断定でき、識別子では断定できない。
+    expect(interpretWellnessRefetch("id", []).kind).toBe("deleted");
+    expect(interpretWellnessRefetch("identifier", []).kind).toBe("unresolved");
+    expect(interpretWellnessRefetch("identifier", ["row"]).kind).toBe("found");
+  });
+
+  /* ------------------------------------------------------------------ */
   /* 体調記録の症状リンク                                                */
   /* ------------------------------------------------------------------ */
 
@@ -551,7 +769,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           ],
           freeTextSymptoms: ["肩こり"],
         },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -575,7 +793,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           expectedRowVersion: created.entry.rowVersion,
           symptoms: [{ symptomTypeId: fatigueTypeId }],
         },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -592,7 +810,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           expectedRowVersion: replaced.entry.rowVersion,
           symptoms: [],
         },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -606,7 +824,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
         supabase,
         userId,
         { recordedAt, symptoms: [{ symptomTypeId: headacheTypeId }] },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -621,7 +839,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           expectedRowVersion: created.entry.rowVersion,
           overallScore: 5,
         },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -629,27 +847,76 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
     expect(updated.entry.symptoms.map((symptom) => symptom.symptomKey)).toEqual(["headache"]);
   });
 
-  it("最新世代の再送は症状リンクを貼り直す（親だけ保存できた再送を救う）", async () => {
+  it("症状リンクの失敗は本体ごと巻き戻る（1トランザクション）", async () => {
     const recordedAt = "2026-01-16T08:00:00.000Z";
-    const mutationId = "eeee0001-0000-4000-8000-000000000001";
+    const key = "eeee0001-0000-4000-8000-000000000001";
 
-    const created = await expectOk(
-      await saveConditionEntry(supabase, userId, { recordedAt }, mutationId, catalog),
+    // カタログには載っているが、DB からは消えている症状種別を用意する
+    // （カタログを読んでから他の操作で消えた、という競合の再現）。
+    await db.query(
+      `insert into public.symptom_types (owner_id, symptom_key, display_name)
+       values ($1, 'vanishing_symptom', '消える症状')`,
+      [userId],
     );
-    expect(created.entry.symptoms).toEqual([]);
+    const stale = await expectOk(await loadCatalogs(supabase, userId));
+    const vanishingId = stale.symptoms.byKey.get("vanishing_symptom")?.id ?? "";
+    expect(vanishingId).not.toBe("");
+    await db.query("delete from public.symptom_types where id = $1", [vanishingId]);
 
-    // 「親は保存できたが症状の置換に失敗した」あとの再送（同じ冪等キー）。
+    // 症状リンクの登録で落ちる。本体の作成も同じトランザクションなので巻き戻る。
+    const failed = await expectError(
+      await saveConditionEntry(
+        supabase,
+        userId,
+        { recordedAt, overallScore: 7, symptoms: [{ symptomTypeId: vanishingId }] },
+        key,
+        stale,
+      ),
+    );
+    expect(failed.status).toBe(404);
+
+    // 本体だけが確定した中途半端な状態が残っていない。
+    const orphan = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.condition_entries
+       where owner_id = $1 and recorded_at = $2`,
+      [userId, recordedAt],
+    );
+    expect(orphan.rows[0]?.count).toBe("0");
+
+    // 冪等キーの適用結果も残っていない（残ると再送が「適用済み」に化ける）。
+    const logged = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.wellness_mutation_log
+       where owner_id = $1 and client_mutation_id = $2`,
+      [userId, key],
+    );
+    expect(logged.rows[0]?.count).toBe("0");
+
+    // 同じ冪等キーのまま安全に再試行できる（未適用なので新規作成になる）。
+    const retried = await expectOk(
+      await saveConditionEntry(
+        supabase,
+        userId,
+        { recordedAt, overallScore: 7, symptoms: [{ symptomTypeId: headacheTypeId }] },
+        key,
+        catalog,
+      ),
+    );
+    expect(retried.outcome).toBe("created");
+    expect(retried.entry.symptoms.map((symptom) => symptom.symptomKey)).toEqual(["headache"]);
+
+    // もう一度同じキーで送れば、409 ではなく当時の応答が返る。
     const replay = await expectOk(
       await saveConditionEntry(
         supabase,
         userId,
-        { recordedAt, symptoms: [{ symptomTypeId: headacheTypeId }] },
-        mutationId,
+        { recordedAt, overallScore: 7, symptoms: [{ symptomTypeId: headacheTypeId }] },
+        key,
         catalog,
       ),
     );
     expect(replay.outcome).toBe("idempotent_replay");
-    expect(replay.entry.symptoms.map((symptom) => symptom.symptomKey)).toEqual(["headache"]);
+    expect(replay.entry.id).toBe(retried.entry.id);
+    expect(replay.entry.rowVersion).toBe(retried.entry.rowVersion);
   });
 
   it("古い世代の再送は症状リンクを巻き戻さない", async () => {
@@ -707,7 +974,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           recordedAt: "2026-01-18T08:00:00.000Z",
           symptoms: [{ symptomTypeId: "00000000-0000-4000-8000-000000000000" }],
         },
-        undefined,
+        conditionKey(),
         catalog,
       ),
     );
@@ -731,7 +998,7 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
           recordedAt: "2026-01-19T08:00:00.000Z",
           symptoms: [{ symptomTypeId: archivedId }],
         },
-        undefined,
+        conditionKey(),
         refreshed,
       ),
     );

@@ -111,6 +111,12 @@ export const SEED_BEVERAGE_TYPES_RPC = "seed_default_beverage_types";
 export const SEED_SYMPTOM_TYPES_RPC = "seed_default_symptom_types";
 export const REPLACE_CONDITION_SYMPTOMS_RPC = "replace_condition_entry_symptoms";
 
+/**
+ * 体調記録の本体と症状リンクを1トランザクションで保存する DB 関数
+ * （migration 20260903000500）。API からの体調記録の作成・更新は必ずここを通る。
+ */
+export const SAVE_CONDITION_ENTRY_RPC = "save_condition_entry";
+
 /** PostgreSQL のエラーコード（実装仕様書 6.4節の 409 判定などに使う）。 */
 const PG_UNIQUE_VIOLATION = "23505";
 const PG_FOREIGN_KEY_VIOLATION = "23503";
@@ -639,6 +645,42 @@ export async function listSleepEntries(
   return { ok: true, value: { entries, nextCursor } };
 }
 
+/**
+ * 主キーによる1件取得（実装仕様書 6.4節 / docs/api/wellness.md 1.7節）。
+ *
+ * **409 のあとに対象行を特定する第一手段**。一覧の `limit` にも、記録日時・種別に
+ * よる絞り込みにも一切依存しない。
+ *
+ * 記録日時や種別で引き直す方法だと、競合した側の更新が**その日時・種別自体を
+ * 変更していた**場合に0件になり、「削除された」と誤判定してしまう（行はまだある）。
+ * 主キーは行の生存期間中ずっと変わらないので、
+ * **「0件 ＝ 本当に削除された（またはもう所有していない）」が正しく成立する**。
+ *
+ * 所有者はセッション由来。`owner_id` を必ず WHERE に入れ、RLS を二重に効かせる。
+ */
+export async function getSleepEntryById(
+  supabase: SupabaseClient,
+  ownerId: string,
+  id: string,
+): Promise<GuardResult<SleepEntryPage>> {
+  const { data, error } = await supabase
+    .from(SLEEP_ENTRIES_TABLE)
+    .select(SLEEP_ENTRY_COLUMNS)
+    .eq("id", id)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+
+  const row = data as unknown as SleepEntryRow | null;
+  return {
+    ok: true,
+    value: { entries: row === null ? [] : [toSleepEntry(row)], nextCursor: null },
+  };
+}
+
 /** 保存に使う列（生成列・サーバー管理列は含めない）。 */
 const sleepPatch = (input: SleepEntryInput) => ({
   sleep_kind: input.sleepKind,
@@ -840,6 +882,39 @@ export async function listHydrationEntries(
       : null;
 
   return { ok: true, value: { entries, nextCursor } };
+}
+
+/** 主キーによる1件取得（`getSleepEntryById` と同じ役割。1.7節）。 */
+export async function getHydrationEntryById(
+  supabase: SupabaseClient,
+  ownerId: string,
+  id: string,
+  catalog: WellnessCatalog,
+): Promise<GuardResult<HydrationEntryPage>> {
+  const { data, error } = await supabase
+    .from(HYDRATION_ENTRIES_TABLE)
+    .select(HYDRATION_ENTRY_COLUMNS)
+    .eq("id", id)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+
+  const row = data as unknown as HydrationEntryRow | null;
+  if (row === null) {
+    return { ok: true, value: { entries: [], nextCursor: null } };
+  }
+
+  const type = catalog.beverages.byId.get(row.beverage_type_id);
+  return {
+    ok: true,
+    value: {
+      entries: [toHydrationEntry(row, type ? beverageLabel(type) : UNKNOWN_TYPE_LABEL)],
+      nextCursor: null,
+    },
+  };
 }
 
 export async function saveHydrationEntry(
@@ -1098,6 +1173,40 @@ export async function listConditionEntries(
   return { ok: true, value: { entries, nextCursor } };
 }
 
+/** 主キーによる1件取得（`getSleepEntryById` と同じ役割。1.7節）。症状リンクも同梱する。 */
+export async function getConditionEntryById(
+  supabase: SupabaseClient,
+  ownerId: string,
+  id: string,
+  catalog: WellnessCatalog,
+): Promise<GuardResult<ConditionEntryPage>> {
+  const { data, error } = await supabase
+    .from(CONDITION_ENTRIES_TABLE)
+    .select(CONDITION_ENTRY_COLUMNS)
+    .eq("id", id)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+
+  const row = data as unknown as ConditionEntryRow | null;
+  if (row === null) {
+    return { ok: true, value: { entries: [], nextCursor: null } };
+  }
+
+  const symptoms = await loadSymptomsOf(supabase, ownerId, row.id, catalog);
+  if (!symptoms.ok) {
+    return symptoms;
+  }
+
+  return {
+    ok: true,
+    value: { entries: [toConditionEntry(row, symptoms.value)], nextCursor: null },
+  };
+}
+
 const conditionPatch = (input: ConditionEntryInput) => ({
   recorded_at: input.recordedAt,
   timezone: input.timezone ?? DEFAULT_TIMEZONE,
@@ -1111,30 +1220,6 @@ const conditionPatch = (input: ConditionEntryInput) => ({
   free_text_symptoms: input.freeTextSymptoms ?? [],
   note: input.note ?? null,
 });
-
-/**
- * 症状リンクを全置換する（migration 20260903000300 の RPC。1トランザクション）。
- * 症状リンクは従属データなので独自の冪等キーを持たない。
- */
-async function replaceSymptoms(
-  supabase: SupabaseClient,
-  entryId: string,
-  symptoms: NonNullable<ConditionEntryInput["symptoms"]>,
-): Promise<GuardResult<null>> {
-  const { error } = await supabase.rpc(REPLACE_CONDITION_SYMPTOMS_RPC, {
-    p_entry_id: entryId,
-    p_symptoms: symptoms.map((symptom) => ({
-      symptomTypeId: symptom.symptomTypeId,
-      severity: symptom.severity ?? null,
-      note: symptom.note ?? null,
-    })),
-  });
-
-  if (error) {
-    return { ok: false, response: mapUnexpectedError(error) };
-  }
-  return { ok: true, value: null };
-}
 
 /** 1件の体調記録の症状リンクを読む。 */
 async function loadSymptomsOf(
@@ -1150,11 +1235,23 @@ async function loadSymptomsOf(
   return { ok: true, value: grouped.value.get(entryId) ?? [] };
 }
 
+/**
+ * 体調記録の保存（実装仕様書 5.5節 / 6.4節）。
+ *
+ * 本体と症状リンクの全置換を **DB 関数 `save_condition_entry`（1トランザクション）**
+ * へ委ねる。API から2回書くと「親だけ確定して症状の置換に失敗した」中途半端な
+ * 状態が生まれるため、そもそも分割しない（migration 20260903000500）。
+ *
+ * `clientMutationId` は**必須**（スキーマが要求し、DB 関数も無指定を拒否する）。
+ * どこで失敗しても同じキーで安全に再送でき、適用済みなら `idempotent_replay`、
+ * 未適用ならやり直しになる。キー無しで再送できてしまうと、新規作成では
+ * 一意制約（owner_id, recorded_at）に当たって 409 となり自己回復できない。
+ */
 export async function saveConditionEntry(
   supabase: SupabaseClient,
   ownerId: string,
   input: ConditionEntryInput,
-  clientMutationId: string | undefined,
+  clientMutationId: string,
   catalog: WellnessCatalog,
 ): Promise<GuardResult<{ entry: ConditionEntry; outcome: MutationOutcome }>> {
   // 症状種別は所有者のカタログに無ければ 404、アーカイブ済みなら 400。
@@ -1169,17 +1266,13 @@ export async function saveConditionEntry(
     }
   }
 
-  const replay = async (): Promise<GuardResult<ConditionEntryRow | null>> => {
-    if (clientMutationId === undefined) {
-      return { ok: true, value: null };
-    }
-    return findMutationSnapshot<ConditionEntryRow>(
+  const replay = async (): Promise<GuardResult<ConditionEntryRow | null>> =>
+    findMutationSnapshot<ConditionEntryRow>(
       supabase,
       ownerId,
       CONDITION_ENTRIES_TABLE,
       clientMutationId,
     );
-  };
 
   const finish = async (
     row: ConditionEntryRow,
@@ -1198,118 +1291,58 @@ export async function saveConditionEntry(
   }
   if (first.value !== null) {
     // 再送。親のスカラー値は「適用当時のスナップショット」を返す。
-    //
-    // 症状リンクは親とは別の操作なので、スナップショットには含まれない。
-    // 「親は保存できたが症状の置換に失敗した」まま再送されたケースを救うため、
-    // **スナップショットが最新世代のときだけ**症状を貼り直す（同じ内容の再適用は
-    // 全置換なので冪等）。古い世代の再送でやると、その後に入った新しい症状を
-    // 巻き戻してしまうので触らない。
-    if (input.symptoms !== undefined) {
-      const current = await readConditionRowVersion(supabase, ownerId, first.value.id);
-      if (!current.ok) {
-        return current;
-      }
-      if (current.value !== null && current.value === Number(first.value.row_version)) {
-        const replaced = await replaceSymptoms(supabase, first.value.id, input.symptoms);
-        if (!replaced.ok) {
-          return replaced;
-        }
-      }
-    }
+    // 症状リンクは親と同一トランザクションで確定しているので、
+    // 「親だけ保存できた」状態を救うための貼り直しは要らない。
     return finish(first.value, "idempotent_replay");
   }
 
-  if (input.id !== undefined && input.expectedRowVersion !== undefined) {
-    const { data, error } = await supabase
-      .from(CONDITION_ENTRIES_TABLE)
-      .update({ ...conditionPatch(input), client_mutation_id: clientMutationId ?? null })
-      .eq("id", input.id)
-      .eq("owner_id", ownerId)
-      .eq("row_version", input.expectedRowVersion)
-      .select(CONDITION_ENTRY_COLUMNS)
-      .maybeSingle();
+  const { data, error } = await supabase.rpc(SAVE_CONDITION_ENTRY_RPC, {
+    p_entry: conditionPatch(input),
+    p_client_mutation_id: clientMutationId,
+    // `undefined`（省略）は既存のリンクをそのまま残す。`[]` は全解除。
+    p_symptoms:
+      input.symptoms === undefined
+        ? null
+        : input.symptoms.map((symptom) => ({
+            symptomTypeId: symptom.symptomTypeId,
+            severity: symptom.severity ?? null,
+            note: symptom.note ?? null,
+          })),
+    p_id: input.id ?? null,
+    p_expected_row_version: input.expectedRowVersion ?? null,
+  });
 
-    if (error !== null || data === null) {
-      const retry = await replay();
-      if (!retry.ok) {
-        return retry;
-      }
-      if (retry.value !== null) {
-        return finish(retry.value, "idempotent_replay");
-      }
-      if (error === null) {
-        return { ok: false, response: wellnessConflict() };
-      }
-      if (error.code === PG_UNIQUE_VIOLATION) {
-        return { ok: false, response: wellnessDuplicateConflict() };
-      }
-      return { ok: false, response: mapUnexpectedError(error) };
+  // 実装仕様書 6.4節: 同じ冪等キーの同時到達は「再送」であって競合ではない。
+  // 409 を返す前に必ず冪等キーで既存の成功結果を探し直す。
+  const conflictOrReplay = async (
+    response: Response,
+  ): Promise<GuardResult<{ entry: ConditionEntry; outcome: MutationOutcome }>> => {
+    const retry = await replay();
+    if (!retry.ok) {
+      return retry;
     }
-
-    const row = data as unknown as ConditionEntryRow;
-    if (input.symptoms !== undefined) {
-      const replaced = await replaceSymptoms(supabase, row.id, input.symptoms);
-      if (!replaced.ok) {
-        return replaced;
-      }
+    if (retry.value !== null) {
+      return finish(retry.value, "idempotent_replay");
     }
-    return finish(row, "updated");
-  }
-
-  const { data, error } = await supabase
-    .from(CONDITION_ENTRIES_TABLE)
-    .insert({
-      owner_id: ownerId,
-      ...conditionPatch(input),
-      client_mutation_id: clientMutationId ?? null,
-    })
-    .select(CONDITION_ENTRY_COLUMNS)
-    .maybeSingle();
+    return { ok: false, response };
+  };
 
   if (error) {
+    // 一意制約違反は「同じ記録日時の記録が既にある」か「同じ冪等キーの同時到達」。
+    // 後者は再送なので、409 を返す前に冪等キーで引き直す。
     if (error.code === PG_UNIQUE_VIOLATION) {
-      const retry = await replay();
-      if (retry.ok && retry.value !== null) {
-        return finish(retry.value, "idempotent_replay");
-      }
-      return { ok: false, response: wellnessDuplicateConflict() };
+      return conflictOrReplay(wellnessDuplicateConflict());
     }
     return { ok: false, response: mapUnexpectedError(error) };
   }
 
-  if (data === null) {
-    return { ok: false, response: wellnessConflict() };
+  // DB 関数は0件で「行が無い／版番号が古い」を伝える（両者を区別しない）。
+  const row = ((data ?? []) as unknown as ConditionEntryRow[])[0];
+  if (row === undefined) {
+    return conflictOrReplay(wellnessConflict());
   }
 
-  const row = data as unknown as ConditionEntryRow;
-  if (input.symptoms !== undefined && input.symptoms.length > 0) {
-    const replaced = await replaceSymptoms(supabase, row.id, input.symptoms);
-    if (!replaced.ok) {
-      return replaced;
-    }
-  }
-  return finish(row, "created");
-}
-
-async function readConditionRowVersion(
-  supabase: SupabaseClient,
-  ownerId: string,
-  entryId: string,
-): Promise<GuardResult<number | null>> {
-  const { data, error } = await supabase
-    .from(CONDITION_ENTRIES_TABLE)
-    .select("row_version")
-    .eq("id", entryId)
-    .eq("owner_id", ownerId)
-    .maybeSingle();
-
-  if (error) {
-    return { ok: false, response: mapUnexpectedError(error) };
-  }
-  if (data === null) {
-    return { ok: true, value: null };
-  }
-  return { ok: true, value: Number((data as { row_version: number | string }).row_version) };
+  return finish(row, input.id === undefined ? "created" : "updated");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1469,8 +1502,12 @@ async function saveGoalRow<Row, Api>(
       if (retry.value !== null) {
         return { ok: true, value: { row: retry.value, outcome: "idempotent_replay" } };
       }
+      // 目標の競合は版番号不一致（0件更新）も重複（一意制約違反）も
+      // `WELLNESS_GOAL_CONFLICT` で返す（docs/api/wellness.md 1.8節の契約）。
+      // 記録用の `WELLNESS_CONFLICT` を混ぜると、画面が目標の競合を
+      // 記録の競合として扱ってしまう。
       if (error === null) {
-        return { ok: false, response: wellnessConflict() };
+        return { ok: false, response: wellnessGoalConflict() };
       }
       if (error.code === PG_UNIQUE_VIOLATION) {
         return { ok: false, response: wellnessGoalConflict() };

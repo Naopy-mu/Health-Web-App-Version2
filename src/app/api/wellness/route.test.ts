@@ -484,6 +484,89 @@ describe("GET /api/wellness（実装仕様書 5.5節 / 7章）", () => {
     const response = await GET(getRequest("?resource=condition&sleepKind=nap"));
     expect(response.status).toBe(400);
   });
+
+  /* ---------------------------------------------------------------- */
+  /* id による1件取得（409 後の対象特定。docs/api/wellness.md 1.7節） */
+  /* ---------------------------------------------------------------- */
+
+  it("resource + id は主キーで1件だけを取りに行く（limit・絞り込みに依存しない）", async () => {
+    const fake = mockSupabase({
+      responses: {
+        "select:sleep_entries": [{ data: sleepEntryRow({ row_version: 4 }), error: null }],
+      },
+    });
+
+    const data = await readData(await GET(getRequest(`?resource=sleep&id=${ENTRY_ID}`)));
+
+    expect((data.entries as Record<string, unknown>[])[0]?.rowVersion).toBe(4);
+    expect((data.page as { nextCursor: string | null }).nextCursor).toBeNull();
+
+    const lookup = fake.operations.find((operation) => operation.table === "sleep_entries");
+    expect(lookup?.single).toBe(true);
+    expect(lookup?.limitValue).toBeUndefined();
+    expect(lookup?.filters).toEqual([
+      { op: "eq", column: "id", value: ENTRY_ID },
+      { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+    ]);
+  });
+
+  it("id で0件なら entries は空（＝本当に削除された）", async () => {
+    mockSupabase({ responses: { "select:sleep_entries": [{ data: null, error: null }] } });
+
+    const data = await readData(await GET(getRequest(`?resource=sleep&id=${ENTRY_ID}`)));
+    expect(data.entries).toEqual([]);
+  });
+
+  it("水分・体調も id で1件取得できる（体調は症状リンクも同梱）", async () => {
+    mockSupabase({
+      responses: { "select:hydration_entries": [{ data: hydrationEntryRow(), error: null }] },
+    });
+    const hydration = await readData(await GET(getRequest(`?resource=hydration&id=${ENTRY_ID}`)));
+    expect((hydration.entries as Record<string, unknown>[])[0]?.beverageKey).toBe("water");
+
+    mockSupabase({
+      responses: {
+        "select:condition_entries": [{ data: conditionEntryRow(), error: null }],
+        "select:condition_entry_symptoms": [
+          {
+            data: [
+              {
+                id: "7e2d3c4b-5a69-4788-9900-aabbccddeeff",
+                entry_id: ENTRY_ID,
+                symptom_type_id: HEADACHE_TYPE_ID,
+                severity: 3,
+                note: null,
+                row_version: 1,
+                client_mutation_id: null,
+                created_at: "2026-09-02T08:00:00+00:00",
+                updated_at: "2026-09-02T08:00:00+00:00",
+              },
+            ],
+            error: null,
+          },
+        ],
+      },
+    });
+    const condition = await readData(await GET(getRequest(`?resource=condition&id=${ENTRY_ID}`)));
+    const entry = (condition.entries as Record<string, unknown>[])[0];
+    expect((entry?.symptoms as Record<string, unknown>[])[0]?.symptomKey).toBe("headache");
+  });
+
+  it("id と一覧の絞り込みの併用は 400（1件取得は他条件に依存しない）", async () => {
+    for (const extra of [
+      "&from=2026-09-01T00:00:00Z",
+      "&to=2026-09-01T00:00:00Z",
+      "&cursor=abc",
+      "&sleepKind=nap",
+    ]) {
+      const response = await GET(getRequest(`?resource=sleep&id=${ENTRY_ID}${extra}`));
+      expect(response.status, extra).toBe(400);
+    }
+  });
+
+  it("id の形式が不正なら 400", async () => {
+    expect((await GET(getRequest("?resource=sleep&id=not-a-uuid"))).status).toBe(400);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -722,52 +805,117 @@ describe("POST /api/wellness — 水分（実装仕様書 5.5節）", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("POST /api/wellness — 体調（実装仕様書 5.5節）", () => {
-  it("症状リンクは全置換の RPC へ渡る", async () => {
-    const fake = mockSupabase({
-      responses: { "insert:condition_entries": [{ data: conditionEntryRow(), error: null }] },
-    });
+  /** 本体と症状リンクを1トランザクションで書く DB 関数の応答（migration 20260903000500）。 */
+  const savedCondition = (overrides: Record<string, unknown> = {}) => ({
+    save_condition_entry: { data: [conditionEntryRow(overrides)], error: null },
+  });
+
+  const conditionRequest = (entry: Record<string, unknown>) => ({
+    resource: "condition",
+    clientMutationId: MUTATION_ID,
+    entry,
+  });
+
+  it("本体と症状リンクは単一の DB 関数（1トランザクション）へ渡る", async () => {
+    const fake = mockSupabase({ rpc: savedCondition() });
 
     const response = await POST(
-      postRequest({
-        resource: "condition",
-        entry: {
+      postRequest(
+        conditionRequest({
           recordedAt: "2026-09-02T08:00:00Z",
           overallScore: 7,
           symptoms: [{ symptomTypeId: HEADACHE_TYPE_ID, severity: 3 }],
-        },
-      }),
+        }),
+      ),
     );
 
     expect(response.status).toBe(201);
-    expect(fake.rpcCalls).toContain("replace_condition_entry_symptoms");
-    const call = fake.rpcArgs.find((entry) => entry.name === "replace_condition_entry_symptoms");
-    expect(call?.args).toEqual({
-      p_entry_id: ENTRY_ID,
+
+    // 親行を直接 insert / update せず、必ず DB 関数を通す
+    // （2回書くと「親だけ確定」の中途半端な状態が生まれるため）。
+    expect(
+      fake.operations.some(
+        (operation) =>
+          operation.table === "condition_entries" &&
+          (operation.kind === "insert" || operation.kind === "update"),
+      ),
+    ).toBe(false);
+
+    const call = fake.rpcArgs.find((rpc) => rpc.name === "save_condition_entry");
+    expect(call?.args).toMatchObject({
+      p_client_mutation_id: MUTATION_ID,
+      p_id: null,
+      p_expected_row_version: null,
       p_symptoms: [{ symptomTypeId: HEADACHE_TYPE_ID, severity: 3, note: null }],
+    });
+    expect(call?.args.p_entry).toMatchObject({
+      recorded_at: "2026-09-02T08:00:00Z",
+      overall_score: 7,
+      free_text_symptoms: [],
     });
   });
 
-  it("症状を省略すると RPC を呼ばない（既存のリンクを残す）", async () => {
-    const fake = mockSupabase({
-      responses: { "insert:condition_entries": [{ data: conditionEntryRow(), error: null }] },
-    });
+  it("症状を省略すると p_symptoms は null（既存のリンクを残す）", async () => {
+    const fake = mockSupabase({ rpc: savedCondition() });
 
-    await POST(
+    await POST(postRequest(conditionRequest({ recordedAt: "2026-09-02T08:00:00Z" })));
+
+    const call = fake.rpcArgs.find((rpc) => rpc.name === "save_condition_entry");
+    expect(call?.args.p_symptoms).toBeNull();
+  });
+
+  it("clientMutationId は必須（安全な再試行のため）", async () => {
+    const response = await POST(
       postRequest({ resource: "condition", entry: { recordedAt: "2026-09-02T08:00:00Z" } }),
     );
 
-    expect(fake.rpcCalls).not.toContain("replace_condition_entry_symptoms");
+    expect(response.status).toBe(400);
+    expect((await readError(response)).error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("更新では id と期待版番号が DB 関数へ渡る（楽観ロック）", async () => {
+    const fake = mockSupabase({ rpc: savedCondition({ row_version: 2 }) });
+
+    const response = await POST(
+      postRequest(
+        conditionRequest({
+          id: ENTRY_ID,
+          expectedRowVersion: 1,
+          recordedAt: "2026-09-02T08:00:00Z",
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    const call = fake.rpcArgs.find((rpc) => rpc.name === "save_condition_entry");
+    expect(call?.args).toMatchObject({ p_id: ENTRY_ID, p_expected_row_version: 1 });
+  });
+
+  it("DB 関数が0件を返したら 409 WELLNESS_CONFLICT（版番号不一致・対象なし）", async () => {
+    mockSupabase({ rpc: { save_condition_entry: { data: [], error: null } } });
+
+    const response = await POST(
+      postRequest(
+        conditionRequest({
+          id: ENTRY_ID,
+          expectedRowVersion: 1,
+          recordedAt: "2026-09-02T08:00:00Z",
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("WELLNESS_CONFLICT");
   });
 
   it("所有者の種別に無い症状は 404", async () => {
     const response = await POST(
-      postRequest({
-        resource: "condition",
-        entry: {
+      postRequest(
+        conditionRequest({
           recordedAt: "2026-09-02T08:00:00Z",
           symptoms: [{ symptomTypeId: "00000000-0000-4000-8000-000000000000" }],
-        },
-      }),
+        }),
+      ),
     );
     expect(response.status).toBe(404);
     expect((await readError(response)).error.code).toBe("WELLNESS_TYPE_NOT_FOUND");
@@ -775,15 +923,16 @@ describe("POST /api/wellness — 体調（実装仕様書 5.5節）", () => {
 
   it("同一記録日時の重複は 409 WELLNESS_DUPLICATE_CONFLICT", async () => {
     mockSupabase({
-      responses: {
-        "insert:condition_entries": [
-          { data: null, error: uniqueViolation("condition_entries_owner_recorded_at_key") },
-        ],
+      rpc: {
+        save_condition_entry: {
+          data: null,
+          error: uniqueViolation("condition_entries_owner_recorded_at_key"),
+        },
       },
     });
 
     const response = await POST(
-      postRequest({ resource: "condition", entry: { recordedAt: "2026-09-02T08:00:00Z" } }),
+      postRequest(conditionRequest({ recordedAt: "2026-09-02T08:00:00Z" })),
     );
     expect(response.status).toBe(409);
     expect((await readError(response)).error.code).toBe("WELLNESS_DUPLICATE_CONFLICT");
@@ -829,6 +978,28 @@ describe("POST /api/wellness — 目標と種別（実装仕様書 5.5節）", (
         goal: { targetAmountMl: 2000, startDate: "2026-09-01" },
       }),
     );
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("WELLNESS_GOAL_CONFLICT");
+  });
+
+  it("目標の版番号不一致（更新0件）も 409 WELLNESS_GOAL_CONFLICT", async () => {
+    // 契約（docs/api/wellness.md 1.8節）では、目標の競合は重複も版番号不一致も
+    // `WELLNESS_GOAL_CONFLICT`。記録用の `WELLNESS_CONFLICT` を混ぜると、
+    // 画面が目標の競合を記録の競合として扱ってしまう。
+    mockSupabase({ responses: { "update:sleep_goals": [{ data: null, error: null }] } });
+
+    const response = await POST(
+      postRequest({
+        resource: "sleep_goal",
+        goal: {
+          id: ENTRY_ID,
+          expectedRowVersion: 1,
+          targetSleepMinutes: 420,
+          startDate: "2026-09-01",
+        },
+      }),
+    );
+
     expect(response.status).toBe(409);
     expect((await readError(response)).error.code).toBe("WELLNESS_GOAL_CONFLICT");
   });
@@ -1090,7 +1261,11 @@ describe("応答が契約スキーマを満たす（フロントが同じスキ�
   });
 
   it("POST: 各リソースの応答が saveWellnessResponseSchema を満たす", async () => {
-    const cases: readonly { body: unknown; responses: FakeResponseScript }[] = [
+    const cases: readonly {
+      body: unknown;
+      responses?: FakeResponseScript;
+      rpc?: FakeSupabaseOptions["rpc"];
+    }[] = [
       {
         body: { resource: "sleep", entry: validSleepEntry },
         responses: { "insert:sleep_entries": [{ data: sleepEntryRow(), error: null }] },
@@ -1108,8 +1283,13 @@ describe("応答が契約スキーマを満たす（フロントが同じスキ�
         responses: { "insert:hydration_entries": [{ data: hydrationEntryRow(), error: null }] },
       },
       {
-        body: { resource: "condition", entry: { recordedAt: "2026-09-02T08:00:00Z" } },
-        responses: { "insert:condition_entries": [{ data: conditionEntryRow(), error: null }] },
+        // 体調は本体と症状リンクをまとめて書く DB 関数を通る（1トランザクション）。
+        body: {
+          resource: "condition",
+          clientMutationId: MUTATION_ID,
+          entry: { recordedAt: "2026-09-02T08:00:00Z" },
+        },
+        rpc: { save_condition_entry: { data: [conditionEntryRow()], error: null } },
       },
       {
         body: {
@@ -1135,7 +1315,7 @@ describe("応答が契約スキーマを満たす（フロントが同じスキ�
     ];
 
     for (const testCase of cases) {
-      mockSupabase({ responses: testCase.responses });
+      mockSupabase({ responses: testCase.responses, rpc: testCase.rpc });
       const body = await (await POST(postRequest(testCase.body))).json();
       const parsed = saveWellnessResponseSchema.safeParse(body);
       expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);

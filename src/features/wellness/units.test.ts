@@ -119,6 +119,32 @@ describe("睡眠の順序・上限の判定 (実装仕様書 5.5節)", () => {
     ).toContain("awake_not_shorter_than_sleep");
   });
 
+  /**
+   * 比較の相手は「入眠〜起床の総時間」ではなく「睡眠時間 = 起床 - 入眠 - 覚醒時間」。
+   * 総時間と比べていると、下の60分／40分（睡眠20分 < 覚醒40分）が通ってしまう。
+   */
+  it("覚醒時間が総時間より短くても、睡眠時間以上なら違反", () => {
+    const nap = {
+      bedAt: "2026-09-01T13:00:00Z",
+      sleepAt: "2026-09-01T13:00:00Z",
+      wakeAt: "2026-09-01T14:00:00Z",
+      outOfBedAt: "2026-09-01T14:00:00Z",
+    };
+
+    // 総時間60分・覚醒40分 → 睡眠20分。覚醒の方が長いので違反。
+    expect(findSleepChronologyViolations({ ...nap, awakeMinutes: 40 })).toContain(
+      "awake_not_shorter_than_sleep",
+    );
+
+    // ちょうど半分（睡眠30分 = 覚醒30分）も等号なので違反。
+    expect(findSleepChronologyViolations({ ...nap, awakeMinutes: 30 })).toContain(
+      "awake_not_shorter_than_sleep",
+    );
+
+    // 睡眠31分 > 覚醒29分 なら通る。
+    expect(findSleepChronologyViolations({ ...nap, awakeMinutes: 29 })).toEqual([]);
+  });
+
   it("日時が壊れていれば invalid_datetime だけを返す", () => {
     expect(findSleepChronologyViolations({ ...base, wakeAt: "" })).toEqual(["invalid_datetime"]);
   });

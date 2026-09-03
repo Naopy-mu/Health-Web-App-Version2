@@ -307,6 +307,56 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
     expect(checked).toContain("beverage_types_default_not_archived");
   });
 
+  it("アーカイブ済みのカスタム症状は上限30件に数えない", async () => {
+    // 上限に達したときの案内は「不要な症状をアーカイブしてからお試しください」。
+    // アーカイブ済みも数えていると、案内どおりに操作しても枠が空かない。
+    const archiveUser = await signUp(db, "symptom-archive@example.test");
+    await asAuthenticated(db, archiveUser, async () => {
+      await db.query("select public.seed_default_symptom_types()");
+      for (let index = 0; index < 30; index += 1) {
+        await db.query(
+          `insert into public.symptom_types (owner_id, symptom_key, display_name)
+           values ($1, $2, $3)`,
+          [archiveUser, `archivable_${index}`, `アーカイブ候補${index}`],
+        );
+      }
+    });
+
+    // 30件でいっぱい。
+    expect(
+      await expectRejection(() =>
+        asAuthenticated(db, archiveUser, async () =>
+          db.query(
+            `insert into public.symptom_types (owner_id, symptom_key, display_name)
+             values ($1, 'archive_over', '超過')`,
+            [archiveUser],
+          ),
+        ),
+      ),
+    ).toContain("limited to 30 per owner");
+
+    // 1件アーカイブすれば、案内どおり枠が空く。
+    await asAuthenticated(db, archiveUser, async () => {
+      await db.query(
+        `update public.symptom_types set archived_at = now()
+         where owner_id = $1 and symptom_key = 'archivable_0'`,
+        [archiveUser],
+      );
+      await db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'archive_over', '追加できる')`,
+        [archiveUser],
+      );
+    });
+
+    const { rows } = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.symptom_types
+       where owner_id = $1 and not is_default and archived_at is null`,
+      [archiveUser],
+    );
+    expect(rows[0]?.count).toBe("30");
+  });
+
   it("カスタム症状種別は30件まで", async () => {
     const capUser = await signUp(db, "symptom-cap@example.test");
     await asAuthenticated(db, capUser, async () => {
@@ -399,6 +449,39 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
       ),
     );
     expect(message).toContain("sleep_entries_awake_shorter_than_sleep");
+  });
+
+  /**
+   * 実装仕様書 5.5節は「覚醒時間が睡眠時間以上となる値を拒否する。睡眠時間は
+   * `起床-入眠-覚醒時間`」と定める。比較の相手は入眠〜起床の総時間ではないので、
+   * 総時間60分・覚醒40分（睡眠20分）は拒否されなければならない。
+   */
+  it("覚醒時間が総時間より短くても、睡眠時間以上なら拒否する", async () => {
+    const insert = (awakeMinutes: number, sleepAt: string) =>
+      asUser(async () =>
+        db.query<{ sleep_minutes: number }>(
+          `insert into public.sleep_entries
+             (owner_id, sleep_kind, bed_at, sleep_at, wake_at, out_of_bed_at, awake_minutes)
+           values ($1, 'nap', $2::timestamptz, $2::timestamptz,
+                   $2::timestamptz + interval '60 minutes', $2::timestamptz + interval '60 minutes', $3)
+           returning sleep_minutes`,
+          [userId, sleepAt, awakeMinutes],
+        ),
+      );
+
+    // 睡眠20分 < 覚醒40分。
+    expect(await expectRejection(() => insert(40, "2026-09-09T14:00:00Z"))).toContain(
+      "sleep_entries_awake_shorter_than_sleep",
+    );
+
+    // ちょうど半分（睡眠30分 = 覚醒30分）も等号なので拒否。
+    expect(await expectRejection(() => insert(30, "2026-09-09T16:00:00Z"))).toContain(
+      "sleep_entries_awake_shorter_than_sleep",
+    );
+
+    // 睡眠31分 > 覚醒29分 なら通る。
+    const accepted = await insert(29, "2026-09-09T18:00:00Z");
+    expect(Number(accepted.rows[0]?.sleep_minutes)).toBe(31);
   });
 
   it("同一の所有者・種別・入眠日時の重複登録を防ぐ", async () => {
@@ -552,6 +635,30 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
     );
   });
 
+  it("自由記述症状に NULL 要素を入れられない（API 応答は string[]）", async () => {
+    // `bool_and(...)` は NULL を無視する集約なので、要素長だけを見る書き方だと
+    // ARRAY[NULL] が「検査対象0件」で通ってしまう。API 応答スキーマは
+    // NULL 非許容の string[] なので、DB 側で入口を塞ぐ。
+    const insert = (value: string, recordedAt: string) =>
+      asUser(async () =>
+        db.query(
+          `insert into public.condition_entries (owner_id, recorded_at, free_text_symptoms)
+           values ($1, $2::timestamptz, ${value})`,
+          [userId, recordedAt],
+        ),
+      );
+
+    expect(
+      await expectRejection(() => insert("array[null]::text[]", "2026-09-25T08:00:00Z")),
+    ).toContain("condition_entries_free_text_symptoms_valid");
+    expect(
+      await expectRejection(() => insert("array['肩こり', null]::text[]", "2026-09-25T09:00:00Z")),
+    ).toContain("condition_entries_free_text_symptoms_valid");
+
+    // NULL を含まなければこれまでどおり通る。
+    await insert("array['肩こり']::text[]", "2026-09-25T10:00:00Z");
+  });
+
   it("自由記述症状は10件まで", async () => {
     const message = await expectRejection(() =>
       asUser(async () =>
@@ -563,6 +670,92 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
       ),
     );
     expect(message).toContain("condition_entries_free_text_symptoms_valid");
+  });
+
+  it("体調記録の保存 RPC は本体と症状リンクを同時に確定する", async () => {
+    const recordedAt = "2026-09-26T08:00:00Z";
+    const key = "cccc0001-0000-4000-8000-000000000001";
+
+    const saved = await asUser(async () =>
+      db.query<{ id: string; row_version: number; overall_score: number }>(
+        `select * from public.save_condition_entry(
+           p_entry => $1::jsonb,
+           p_client_mutation_id => $2::uuid,
+           p_symptoms => $3::jsonb
+         )`,
+        [
+          JSON.stringify({ recorded_at: recordedAt, overall_score: 7 }),
+          key,
+          JSON.stringify([{ symptomTypeId: headacheTypeId, severity: 2, note: null }]),
+        ],
+      ),
+    );
+    expect(saved.rows).toHaveLength(1);
+    expect(Number(saved.rows[0]?.overall_score)).toBe(7);
+
+    const links = await db.query<{ count: string }>(
+      "select count(*)::text as count from public.condition_entry_symptoms where entry_id = $1",
+      [saved.rows[0]?.id],
+    );
+    expect(links.rows[0]?.count).toBe("1");
+
+    // 冪等キーの適用結果も同じトランザクションで残る。
+    const logged = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.wellness_mutation_log
+       where owner_id = $1 and client_mutation_id = $2 and resource = 'condition_entries'`,
+      [userId, key],
+    );
+    expect(logged.rows[0]?.count).toBe("1");
+
+    // 版番号が合わなければ0件（実装仕様書 6.4節。行の不在と区別しない）。
+    const stale = await asUser(async () =>
+      db.query(
+        `select * from public.save_condition_entry(
+           p_entry => $1::jsonb,
+           p_client_mutation_id => $2::uuid,
+           p_id => $3::uuid,
+           p_expected_row_version => 99
+         )`,
+        [
+          JSON.stringify({ recorded_at: recordedAt, overall_score: 8 }),
+          "cccc0001-0000-4000-8000-000000000002",
+          saved.rows[0]?.id,
+        ],
+      ),
+    );
+    expect(stale.rows).toHaveLength(0);
+  });
+
+  it("体調記録の保存 RPC は冪等キー無しと版番号無しの更新を拒否する", async () => {
+    const noKey = await expectRejection(() =>
+      asUser(async () =>
+        db.query(
+          `select * from public.save_condition_entry(
+             p_entry => $1::jsonb, p_client_mutation_id => null
+           )`,
+          [JSON.stringify({ recorded_at: "2026-09-27T08:00:00Z" })],
+        ),
+      ),
+    );
+    expect(noKey).toContain("client_mutation_id is required");
+
+    const noVersion = await expectRejection(() =>
+      asUser(async () =>
+        db.query(
+          `select * from public.save_condition_entry(
+             p_entry => $1::jsonb,
+             p_client_mutation_id => $2::uuid,
+             p_id => $3::uuid
+           )`,
+          [
+            JSON.stringify({ recorded_at: "2026-09-27T08:00:00Z" }),
+            "cccc0001-0000-4000-8000-000000000003",
+            "00000000-0000-4000-8000-000000000000",
+          ],
+        ),
+      ),
+    );
+    expect(noVersion).toContain("expected row version is required");
   });
 
   it("症状リンクを RPC で全置換できる", async () => {

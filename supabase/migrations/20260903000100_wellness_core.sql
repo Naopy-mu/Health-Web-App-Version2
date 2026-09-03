@@ -48,6 +48,14 @@
 -- ---------------------------------------------------------------------------
 
 -- 自由記述の配列（体調記録の自由記述症状）。件数と各要素の長さを見る。
+--
+-- NULL 要素は明示的に拒否する。`bool_and(...)` は NULL を**無視する**集約なので、
+-- `bool_and(char_length(item) between 1 and max_length)` だけで書くと
+-- `ARRAY[NULL]` が「検査対象が1件も無い」ことになり true で通ってしまう。
+-- API 応答スキーマ（`conditionEntrySchema.freeTextSymptoms`）は `string[]`
+-- （NULL 非許容）なので、直接書き込み経路から NULL 要素が入ると GET が
+-- 契約外のデータを返す。`not exists` で「駄目な要素が1つも無いこと」を要求する
+-- 形に直し、NULL も長さ違反も同じ条件で弾く。
 create or replace function public.wellness_text_array_is_valid(
   items text[],
   max_items integer,
@@ -60,10 +68,11 @@ set search_path = ''
 as $$
   select items is not null
      and coalesce(pg_catalog.cardinality(items), 0) <= max_items
-     and coalesce(
-           (select pg_catalog.bool_and(pg_catalog.char_length(item) between 1 and max_length)
-              from pg_catalog.unnest(items) as item),
-           true
+     and not exists (
+           select 1
+           from pg_catalog.unnest(items) as item
+           where item is null
+              or pg_catalog.char_length(item) not between 1 and max_length
          );
 $$;
 
@@ -342,10 +351,15 @@ create table if not exists public.sleep_entries (
     check (out_of_bed_at - bed_at <= interval '24 hours'),
   constraint sleep_entries_awakenings_range check (awakenings_count between 0 and 30),
   constraint sleep_entries_awake_minutes_range check (awake_minutes between 0 and 720),
-  -- 「覚醒時間が睡眠時間以上となる値を拒否する」。
-  -- 入眠〜起床の分数より覚醒時間が短いことを要求する（等号も拒否）。
+  -- 「覚醒時間が睡眠時間以上となる値を拒否する。睡眠時間は `起床-入眠-覚醒時間`」。
+  --
+  -- 比較の相手は入眠〜起床の総時間ではなく**睡眠時間**である点に注意する。
+  -- 覚醒時間を a、入眠〜起床の総時間（分）を t とすると 睡眠時間 = t - a なので、
+  -- 要求は a < t - a、すなわち 2a < t。
+  -- （総時間と比べる `a < t` だと、例えば t=60・a=40 のように睡眠時間20分より
+  -- 覚醒時間40分の方が長い記録が通ってしまう。）
   constraint sleep_entries_awake_shorter_than_sleep
-    check (awake_minutes < extract(epoch from (wake_at - sleep_at)) / 60),
+    check (awake_minutes * 2 < extract(epoch from (wake_at - sleep_at)) / 60),
   constraint sleep_entries_quality_range check (quality is null or quality between 1 and 5),
   constraint sleep_entries_morning_feeling_range
     check (morning_feeling is null or morning_feeling between 1 and 5),
@@ -710,11 +724,17 @@ begin
 
   -- 実装仕様書 5.5節「症状（既定13種＋任意30件まで）」。
   -- 既定カタログの13件とは別枠で、カスタム症状種別を30件までに抑える。
+  --
+  -- **アーカイブ済み（archived_at is not null）は数えない**。上限に達したときの
+  -- 案内は「不要な症状をアーカイブしてからお試しください」（`errors.ts` の
+  -- `wellnessTypeLimitReached`）であり、アーカイブ済みも数えていると案内どおりに
+  -- 操作しても枠が空かず、利用者が詰んでしまう。
   if tg_table_name = 'symptom_types' and tg_op = 'INSERT' and not new.is_default then
     select pg_catalog.count(*) into custom_count
     from public.symptom_types s
     where s.owner_id = new.owner_id
-      and not s.is_default;
+      and not s.is_default
+      and s.archived_at is null;
 
     if custom_count >= 30 then
       raise exception 'custom symptom types are limited to 30 per owner'
@@ -727,7 +747,7 @@ end;
 $$;
 
 comment on function public.tg_wellness_reference_guard() is
-  '実装仕様書 5.5節: 飲み物・症状の既定カタログを偽装・改ざんから守り、カスタム症状種別を30件までに抑える。';
+  '実装仕様書 5.5節: 飲み物・症状の既定カタログを偽装・改ざんから守り、カスタム症状種別を30件（アーカイブ済みを除く）までに抑える。';
 
 revoke all on function public.tg_wellness_reference_guard() from public, anon, authenticated;
 

@@ -38,6 +38,9 @@ import { requireActiveUser } from "@/server/api/session";
 import { parseQueryParams, parseRequestBody } from "@/server/api/validation";
 import {
   deleteWellnessRow,
+  getConditionEntryById,
+  getHydrationEntryById,
+  getSleepEntryById,
   listConditionEntries,
   listHydrationEntries,
   listHydrationGoals,
@@ -116,8 +119,16 @@ export async function GET(request: NextRequest): Promise<Response> {
     nextCursor,
   });
 
+  // `id` を指定した取得は主キーの1件取得（docs/api/wellness.md 1.7節）。
+  // 一覧の `limit` にも記録日時・種別の絞り込みにも依存しないので、
+  // 409 のあとに対象行を必ず特定できる。0件は「本当に存在しない」を意味する。
+  const targetId = query.value.id;
+
   if (query.value.resource === "hydration") {
-    const list = await listHydrationEntries(supabase, ownerId, query.value, catalog.value);
+    const list =
+      targetId === undefined
+        ? await listHydrationEntries(supabase, ownerId, query.value, catalog.value)
+        : await getHydrationEntryById(supabase, ownerId, targetId, catalog.value);
     if (!list.ok) {
       return list.response;
     }
@@ -130,7 +141,10 @@ export async function GET(request: NextRequest): Promise<Response> {
   }
 
   if (query.value.resource === "condition") {
-    const list = await listConditionEntries(supabase, ownerId, query.value, catalog.value);
+    const list =
+      targetId === undefined
+        ? await listConditionEntries(supabase, ownerId, query.value, catalog.value)
+        : await getConditionEntryById(supabase, ownerId, targetId, catalog.value);
     if (!list.ok) {
       return list.response;
     }
@@ -142,7 +156,10 @@ export async function GET(request: NextRequest): Promise<Response> {
     });
   }
 
-  const list = await listSleepEntries(supabase, ownerId, query.value);
+  const list =
+    targetId === undefined
+      ? await listSleepEntries(supabase, ownerId, query.value)
+      : await getSleepEntryById(supabase, ownerId, targetId);
   if (!list.ok) {
     return list.response;
   }

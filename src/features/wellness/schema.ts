@@ -329,12 +329,20 @@ export const wellnessOrderSchema = z.enum(["asc", "desc"]);
 export const WELLNESS_PAGE_SIZE_DEFAULT = 100;
 export const WELLNESS_PAGE_SIZE_MAX = 500;
 
+/** `id` と併用できない絞り込み（1件取得は他の条件に一切依存しない）。 */
+const ID_EXCLUSIVE_PARAMS = ["from", "to", "cursor", "sleepKind", "beverageTypeId"] as const;
+
 /**
  * クエリ文字列の検証。`URLSearchParams` から作った素のオブジェクトを渡す。
  * 数値・真偽値は文字列で届くため、ここで変換する。
  *
- * `from` / `to` が比較する列はリソースごとに違う（下表）。409 後の対象特定は
- * この絞り込みで行う（`docs/api/wellness.md` 1.7節）。
+ * 取得方法は2つある（`docs/api/wellness.md` 1.7節）。
+ *
+ * 1. **`id` による1件取得**（409 後の対象特定はこちらを使う）。
+ *    `resource` + `id` を指定すると、その行だけを所有者スコープで直接返す。
+ *    `limit` にも記録日時・種別による絞り込みにも一切依存しない。
+ * 2. **一覧**（`id` を指定しないとき）。`from` / `to` が比較する列は
+ *    リソースごとに違う（下表）。
  *
  * | resource    | 時間軸       | 併用する絞り込み |
  * | ----------- | ------------ | ---------------- |
@@ -345,6 +353,11 @@ export const WELLNESS_PAGE_SIZE_MAX = 500;
 export const wellnessListQuerySchema = z
   .object({
     resource: wellnessListResourceSchema.default("sleep"),
+    /**
+     * 指定するとその1件だけを返す（0件なら**本当に存在しない**）。
+     * 他の絞り込みとは併用できない。
+     */
+    id: z.uuid().optional(),
     /** 時間軸 >= from（含む）。 */
     from: isoDateTimeSchema.optional(),
     /** 時間軸 <= to（含む）。 */
@@ -378,6 +391,19 @@ export const wellnessListQuerySchema = z
         path: ["beverageTypeId"],
         message: "beverageTypeId は resource=hydration のときだけ指定できます。",
       });
+    }
+    // 1件取得は「他の条件に依存しない」ことに意味がある。併用を黙って無視すると、
+    // 呼び出し側が絞り込みが効いていると誤解したまま結果を読んでしまう。
+    if (query.id !== undefined) {
+      for (const name of ID_EXCLUSIVE_PARAMS) {
+        if (query[name] !== undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: [name],
+            message: `${name} は id による1件取得と併用できません。`,
+          });
+        }
+      }
     }
   });
 
@@ -722,10 +748,15 @@ export const saveWellnessRequestSchema = z.discriminatedUnion("resource", [
       entry: hydrationEntryInputSchema,
     })
     .strict(),
+  // 体調記録だけ `clientMutationId` を**必須**にする。本体と症状リンクは
+  // DB 関数 `save_condition_entry` が1トランザクションで書くが、応答を
+  // 受け取れなかったときに「適用済みか未適用か」を判断できるのは冪等キーだけ。
+  // キー無しで再送すると、新規作成では一意制約（所有者・記録日時）に当たって
+  // 409 になり、利用者が自力で復帰できない（docs/api/wellness.md 6.2節）。
   z
     .object({
       resource: z.literal("condition"),
-      clientMutationId: clientMutationIdSchema.optional(),
+      clientMutationId: clientMutationIdSchema,
       entry: conditionEntryInputSchema,
     })
     .strict(),

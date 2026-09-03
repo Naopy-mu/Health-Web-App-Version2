@@ -119,7 +119,7 @@ export type SleepChronologyViolation =
   | "order"
   /** 就床から離床までが24時間を超える。 */
   | "span_over_24_hours"
-  /** 覚醒時間が睡眠時間（入眠〜起床）以上。 */
+  /** 覚醒時間が睡眠時間（起床 - 入眠 - 覚醒時間）以上。 */
   | "awake_not_shorter_than_sleep"
   /** 日時として解釈できない値が含まれる。 */
   | "invalid_datetime";
@@ -148,8 +148,12 @@ export function findSleepChronologyViolations(input: {
   if (outOfBed - bed > SLEEP_SPAN_MINUTES_MAX * 60_000) {
     violations.push("span_over_24_hours");
   }
+  // 実装仕様書 5.5節「覚醒時間が睡眠時間以上となる値を拒否する。睡眠時間は
+  // `起床-入眠-覚醒時間` で算出する」。比較の相手は入眠〜起床の総時間ではなく
+  // **睡眠時間**なので、覚醒時間 a・総時間 t に対して a < t - a、つまり 2a < t を
+  // 要求する（DB の CHECK 制約 `sleep_entries_awake_shorter_than_sleep` と同じ式）。
   // DB と同じく、丸める前の実時間（分、小数を含む）と比べる。
-  if (input.awakeMinutes >= (wake - sleep) / 60_000) {
+  if (input.awakeMinutes * 2 >= (wake - sleep) / 60_000) {
     violations.push("awake_not_shorter_than_sleep");
   }
 

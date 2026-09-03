@@ -311,6 +311,23 @@ describe("POST のリクエスト全体", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("体調記録は clientMutationId が必須（安全な再試行のため）", () => {
+    const entry = { recordedAt: "2026-09-02T08:00:00Z" };
+
+    expect(saveWellnessRequestSchema.safeParse({ resource: "condition", entry }).success).toBe(
+      false,
+    );
+    expect(
+      saveWellnessRequestSchema.safeParse({ resource: "condition", clientMutationId: UUID, entry })
+        .success,
+    ).toBe(true);
+
+    // 他のリソースは従来どおり任意。
+    expect(
+      saveWellnessRequestSchema.safeParse({ resource: "sleep", entry: validSleepEntry }).success,
+    ).toBe(true);
+  });
 });
 
 describe("DELETE のリクエスト", () => {
@@ -364,5 +381,31 @@ describe("GET のクエリ (実装仕様書 5.5節 / 7章)", () => {
 
   it("未知のパラメータは拒否する", () => {
     expect(wellnessListQuerySchema.safeParse({ offset: "10" }).success).toBe(false);
+  });
+
+  it("id は単独で指定する（1件取得は他の絞り込みに依存しない）", () => {
+    expect(wellnessListQuerySchema.safeParse({ resource: "sleep", id: UUID }).success).toBe(true);
+    expect(wellnessListQuerySchema.safeParse({ resource: "condition", id: UUID }).success).toBe(
+      true,
+    );
+    expect(wellnessListQuerySchema.safeParse({ resource: "sleep", id: "not-a-uuid" }).success).toBe(
+      false,
+    );
+
+    for (const extra of [
+      { from: "2026-09-01T00:00:00Z" },
+      { to: "2026-09-01T00:00:00Z" },
+      { cursor: "abc" },
+      { sleepKind: "nap" },
+    ]) {
+      expect(
+        wellnessListQuerySchema.safeParse({ resource: "sleep", id: UUID, ...extra }).success,
+        JSON.stringify(extra),
+      ).toBe(false);
+    }
+    expect(
+      wellnessListQuerySchema.safeParse({ resource: "hydration", id: UUID, beverageTypeId: UUID })
+        .success,
+    ).toBe(false);
   });
 });

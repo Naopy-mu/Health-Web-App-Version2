@@ -181,6 +181,8 @@ describe("users / user_profiles の RLS 分離 (実装仕様書 6.5節 / 9章)",
       { routine_name: "hydration_unit_is_allowed", anon: false, authenticated: true },
       { routine_name: "is_active_user", anon: false, authenticated: true },
       { routine_name: "replace_condition_entry_symptoms", anon: false, authenticated: true },
+      // 体調記録の本体＋症状リンクを1トランザクションで保存する（migration 20260903000500）。
+      { routine_name: "save_condition_entry", anon: false, authenticated: true },
       { routine_name: "seed_default_beverage_types", anon: false, authenticated: true },
       { routine_name: "seed_default_body_measurement_types", anon: false, authenticated: true },
       { routine_name: "seed_default_symptom_types", anon: false, authenticated: true },
