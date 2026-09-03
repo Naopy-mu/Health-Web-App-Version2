@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 /**
  * 身体測定ページの happy-path E2E。
@@ -7,17 +7,16 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
  * ローカル Supabase 等でアカウントを用意し、以下の環境変数を設定してください:
  *   E2E_TEST_EMAIL
  *   E2E_TEST_PASSWORD
- * 変数が未設定の場合はテストをスキップします。
  */
 
 const EMAIL = process.env.E2E_TEST_EMAIL ?? "";
 const PASSWORD = process.env.E2E_TEST_PASSWORD ?? "";
 
-async function signIn(page: Page): Promise<void> {
-  if (!EMAIL || !PASSWORD) {
-    test.skip(true, "E2E_TEST_EMAIL / E2E_TEST_PASSWORD が未設定です");
-  }
+test("E2E 実行前提（資格情報設定）", () => {
+  expect(EMAIL && PASSWORD, "E2E_TEST_EMAIL / E2E_TEST_PASSWORD を設定してください").toBeTruthy();
+});
 
+async function signIn(page: Page): Promise<void> {
   await page.goto("/auth?next=/measurements");
   const signInSection = page.getByRole("region", { name: "メールアドレスでログイン" });
   await signInSection.getByLabel("メールアドレス").fill(EMAIL);
@@ -27,14 +26,16 @@ async function signIn(page: Page): Promise<void> {
 }
 
 /**
- * テストで作成した測定記録をすべて削除する（SF-6）。
+ * テストで作成した測定記録をすべて削除する（SF-6 / 新規-3）。
  * ページングで全件取得し、rowVersion を指定して DELETE する。
+ * page.request を使い、ブラウザコンテキストの Cookie を共有する。
  */
-async function cleanupMeasurements(request: APIRequestContext): Promise<void> {
+async function cleanupMeasurements(page: Page): Promise<void> {
   if (!EMAIL || !PASSWORD) {
     return;
   }
 
+  const origin = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
   const all: { id: string; rowVersion: number }[] = [];
   let cursor: string | undefined;
   do {
@@ -42,10 +43,10 @@ async function cleanupMeasurements(request: APIRequestContext): Promise<void> {
     if (cursor) {
       params.set("cursor", cursor);
     }
-    const response = await request.get(`/api/measurements?${params.toString()}`);
-    if (!response.ok()) {
-      break;
-    }
+    const response = await page.request.get(`/api/measurements?${params.toString()}`, {
+      headers: { Origin: origin },
+    });
+    expect(response, "cleanup GET /api/measurements").toBeOK();
     const json = (await response.json()) as {
       data: {
         measurements: { id: string; rowVersion: number }[];
@@ -57,12 +58,14 @@ async function cleanupMeasurements(request: APIRequestContext): Promise<void> {
   } while (cursor);
 
   for (const measurement of all) {
-    await request.delete("/api/measurements", {
+    const response = await page.request.delete("/api/measurements", {
+      headers: { Origin: origin, "Content-Type": "application/json" },
       data: {
         measurementId: measurement.id,
         expectedRowVersion: measurement.rowVersion,
       },
     });
+    expect(response, "cleanup DELETE /api/measurements").toBeOK();
   }
 }
 
@@ -71,12 +74,15 @@ test.describe("Measurements happy path", () => {
   test.describe.configure({ mode: "serial" });
 
   test.beforeEach(async ({ page }) => {
+    if (!EMAIL || !PASSWORD) {
+      test.skip(true, "E2E_TEST_EMAIL / E2E_TEST_PASSWORD が未設定です");
+    }
     await signIn(page);
     await expect(page.getByRole("heading", { name: "身体測定" })).toBeVisible();
   });
 
-  test.afterEach(async ({ request }) => {
-    await cleanupMeasurements(request);
+  test.afterEach(async ({ page }) => {
+    await cleanupMeasurements(page);
   });
 
   test("記録を追加・一覧表示・編集・削除できる", async ({ page }) => {
@@ -116,10 +122,6 @@ test.describe("Measurements happy path", () => {
   });
 
   test("409 競合後に最新値を取得して再試行できる", async ({ browser }) => {
-    if (!EMAIL || !PASSWORD) {
-      test.skip(true, "E2E_TEST_EMAIL / E2E_TEST_PASSWORD が未設定です");
-    }
-
     // 2 つのタブで同じアカウントにログイン
     const pageA = await browser.newPage();
     const pageB = await browser.newPage();

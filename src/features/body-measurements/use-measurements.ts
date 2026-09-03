@@ -38,7 +38,10 @@ import { findUnachievedGoal, generateUuid, sortMeasurementsByDate } from "./util
 
 type LoadingState = "idle" | "loading" | "submitting";
 
-type ConflictKind = "measurement" | "goal" | "type";
+type ConflictTargetInfo =
+  | { kind: "measurement"; id: string; typeId: string; measuredAt: string }
+  | { kind: "goal"; id: string; typeId: string }
+  | { kind: "type"; id: string };
 
 export type ConflictInfo = {
   /** 身体測定APIのエラーコード。 */
@@ -233,7 +236,7 @@ export function useMeasurements() {
     async (
       apiError: ApiError,
       status: number,
-      options: { kind: ConflictKind; id?: string } = { kind: "measurement" },
+      options: ConflictTargetInfo = { kind: "measurement", id: "", typeId: "", measuredAt: "" },
     ) => {
       if (status === 401) {
         window.location.href = "/auth?next=/measurements";
@@ -245,19 +248,11 @@ export function useMeasurements() {
       }
 
       // 競合時は最新状態を再取得して提示する（実装仕様書 6.4節、C1/C2）。
-      // アクティブなフィルタに合わせて再取得し、編集対象が含まれない場合は
-      // フィルタを解除して再取得する（CR-1 / SF-1）。
-      let measurementsResult = await listMeasurements({ ...listQuery, cursor: undefined });
+      // 一覧はアクティブなフィルタ・並び順を維持して再取得し、編集対象が
+      // フィルタ結果に含まれなくても別途「対象そのものを一意に特定するクエリ」
+      // で rowVersion を取得する（CR-1 / SF-1 / 新規-1）。
+      const measurementsResult = await listMeasurements({ ...listQuery, cursor: undefined });
       const goalsResult = await listGoals({ includeAchieved: true });
-
-      if (
-        measurementsResult.ok &&
-        options.kind === "measurement" &&
-        options.id &&
-        !measurementsResult.data.measurements.some((m) => m.id === options.id)
-      ) {
-        measurementsResult = await listMeasurements({ order: "desc", limit: 500 });
-      }
 
       if (!measurementsResult.ok || !goalsResult.ok) {
         if (!measurementsResult.ok) {
@@ -279,24 +274,52 @@ export function useMeasurements() {
 
       let target: ConflictInfo["target"] = undefined;
 
-      if (options.id) {
-        if (options.kind === "measurement") {
-          const latest = measurementsResult.data.measurements.find((m) => m.id === options.id);
-          if (latest) {
-            target = { kind: "measurement", data: latest };
-            setEditingMeasurement((prev) => refreshRowVersion(prev, latest));
+      if (options.kind === "measurement") {
+        // 一覧の再取得結果に含まれればそこから取得する。
+        let latest = measurementsResult.data.measurements.find((m) => m.id === options.id);
+
+        if (!latest && options.typeId && options.measuredAt) {
+          // (owner, type, measured_at) の一意制約より、typeId + measuredAt で
+          // 必ず1件に特定できる。データ量に依存せず対象の最新 rowVersion を取得する。
+          const pinpointResult = await listMeasurements({
+            typeId: options.typeId,
+            from: options.measuredAt,
+            to: options.measuredAt,
+            order: "desc",
+            limit: 1,
+          });
+          if (pinpointResult.ok) {
+            latest = pinpointResult.data.measurements.find((m) => m.id === options.id);
           }
-        } else if (options.kind === "goal") {
-          const latest = goalsResult.data.goals.find((g) => g.id === options.id);
-          if (latest) {
-            target = { kind: "goal", data: latest };
-            setEditingGoal((prev) => refreshRowVersion(prev, latest));
+        }
+
+        if (latest) {
+          target = { kind: "measurement", data: latest };
+          setEditingMeasurement((prev) => refreshRowVersion(prev, latest));
+        }
+      } else if (options.kind === "goal") {
+        // 目標は typeId で絞り込める。未達成目標は種別ごとに1件のため、
+        // 一覧結果に無くても typeId 絞り込みで確実に対象に到達する。
+        let latest = goalsResult.data.goals.find((g) => g.id === options.id);
+
+        if (!latest && options.typeId) {
+          const pinpointResult = await listGoals({
+            typeId: options.typeId,
+            includeAchieved: true,
+          });
+          if (pinpointResult.ok) {
+            latest = pinpointResult.data.goals.find((g) => g.id === options.id);
           }
-        } else if (options.kind === "type") {
-          const latest = measurementsResult.data.types.find((t) => t.id === options.id);
-          if (latest) {
-            target = { kind: "type", data: latest };
-          }
+        }
+
+        if (latest) {
+          target = { kind: "goal", data: latest };
+          setEditingGoal((prev) => refreshRowVersion(prev, latest));
+        }
+      } else if (options.kind === "type") {
+        const latest = measurementsResult.data.types.find((t) => t.id === options.id);
+        if (latest) {
+          target = { kind: "type", data: latest };
         }
       }
 
@@ -339,7 +362,9 @@ export function useMeasurements() {
       if (!result.ok) {
         await handleMutationError(result.error, result.status, {
           kind: "measurement",
-          id: input.id,
+          id: input.id ?? "",
+          typeId: input.typeId,
+          measuredAt: input.measuredAt,
         });
         setLoadingState("idle");
         return false;
@@ -353,18 +378,23 @@ export function useMeasurements() {
   );
 
   const removeMeasurement = useCallback(
-    async (id: string, rowVersion: number) => {
+    async (measurement: Measurement) => {
       setLoadingState("submitting");
       setError(null);
       setConflict(null);
 
       const request: DeleteMeasurementRequest = {
-        measurementId: id,
-        expectedRowVersion: rowVersion,
+        measurementId: measurement.id,
+        expectedRowVersion: measurement.rowVersion,
       };
       const result = await deleteMeasurement(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, { kind: "measurement", id });
+        await handleMutationError(result.error, result.status, {
+          kind: "measurement",
+          id: measurement.id,
+          typeId: measurement.typeId,
+          measuredAt: measurement.measuredAt,
+        });
         setLoadingState("idle");
         return false;
       }
@@ -394,7 +424,7 @@ export function useMeasurements() {
         type,
       });
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, { kind: "type" });
+        await handleMutationError(result.error, result.status, { kind: "type", id: "" });
         setLoadingState("idle");
         return false;
       }
@@ -458,7 +488,11 @@ export function useMeasurements() {
 
       const result = await saveGoal(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, { kind: "goal", id: input.id });
+        await handleMutationError(result.error, result.status, {
+          kind: "goal",
+          id: input.id ?? "",
+          typeId: input.typeId,
+        });
         setLoadingState("idle");
         return false;
       }
@@ -471,15 +505,22 @@ export function useMeasurements() {
   );
 
   const removeGoal = useCallback(
-    async (id: string, rowVersion: number) => {
+    async (goal: MeasurementGoal) => {
       setLoadingState("submitting");
       setError(null);
       setConflict(null);
 
-      const request: DeleteMeasurementGoalRequest = { goalId: id, expectedRowVersion: rowVersion };
+      const request: DeleteMeasurementGoalRequest = {
+        goalId: goal.id,
+        expectedRowVersion: goal.rowVersion,
+      };
       const result = await deleteGoal(request);
       if (!result.ok) {
-        await handleMutationError(result.error, result.status, { kind: "goal", id });
+        await handleMutationError(result.error, result.status, {
+          kind: "goal",
+          id: goal.id,
+          typeId: goal.typeId,
+        });
         setLoadingState("idle");
         return false;
       }

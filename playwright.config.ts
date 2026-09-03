@@ -14,6 +14,13 @@ export default defineConfig({
     baseURL,
     trace: "on-first-retry",
   },
+  // production build を事前に作成しておく必要がある（P3b-1）。
+  webServer: {
+    command: "node --run start",
+    url: "http://localhost:3000",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120000,
+  },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "mobile-safari", use: { ...devices["iPhone 14"] } },

@@ -98,7 +98,7 @@ export function MeasurementsPage() {
       if (!window.confirm("この測定記録を削除してよろしいですか？")) {
         return;
       }
-      const ok = await removeMeasurement(measurement.id, measurement.rowVersion);
+      const ok = await removeMeasurement(measurement);
       if (ok && editingMeasurement?.id === measurement.id) {
         setEditingMeasurement(null);
       }

@@ -62,7 +62,7 @@ type GoalManagerProps = {
     note: string | null;
     achievedAt: string | null;
   }) => Promise<boolean> | boolean;
-  onDelete: (id: string, rowVersion: number) => Promise<boolean> | boolean;
+  onDelete: (goal: MeasurementGoal) => Promise<boolean> | boolean;
   disabled: boolean;
   serverError: string | null;
   conflict?: ConflictInfo | null;
@@ -293,7 +293,7 @@ export function GoalManager({
                           <button
                             className={`${styles.button} ${styles.buttonDanger}`}
                             type="button"
-                            onClick={() => onDelete(goal.id, goal.rowVersion)}
+                            onClick={() => onDelete(goal)}
                             disabled={disabled}
                           >
                             削除

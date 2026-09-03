@@ -94,7 +94,11 @@ function makeMeasurement(overrides: Partial<Measurement> = {}): Measurement {
   };
 }
 
-function makeListResponse(measurements: Measurement[], types: MeasurementType[] = [WEIGHT_TYPE]) {
+function makeListResponse(
+  measurements: Measurement[],
+  types: MeasurementType[] = [WEIGHT_TYPE],
+  pageOverrides: Partial<{ limit: number; order: "asc" | "desc" }> = {},
+) {
   return {
     measurements,
     types,
@@ -104,7 +108,11 @@ function makeListResponse(measurements: Measurement[], types: MeasurementType[] 
       latestWeightMeasuredAt: "2026-08-27T07:30:00.000Z",
       bmi: 22.1,
     },
-    page: { limit: 100, order: "desc" as const, nextCursor: null },
+    page: {
+      limit: pageOverrides.limit ?? 100,
+      order: pageOverrides.order ?? "desc",
+      nextCursor: null,
+    },
   };
 }
 
@@ -371,6 +379,98 @@ describe("MeasurementsPage", () => {
     expect(api.saveGoal).toHaveBeenLastCalledWith(
       expect.objectContaining({
         goal: expect.objectContaining({ expectedRowVersion: 2 }),
+      }),
+    );
+  });
+
+  it("409 後、フィルタ外の対象は typeId + measuredAt の一意特定クエリで rowVersion を取得する（新規-6）", async () => {
+    const oldMeasurement = makeMeasurement({
+      id: "11111111-1111-1111-1111-111111111111",
+      measuredAt: "2020-01-01T00:00:00.000Z",
+      value: 60,
+      rowVersion: 1,
+    });
+    const latestMeasurement = makeMeasurement({
+      id: "22222222-2222-2222-2222-222222222222",
+      measuredAt: "2026-08-27T07:30:00.000Z",
+      value: 62.4,
+      rowVersion: 1,
+    });
+    const refreshedOld = { ...oldMeasurement, value: 60.5, rowVersion: 2 };
+    const updatedOld = { ...oldMeasurement, value: 61, rowVersion: 3 };
+
+    vi.mocked(api.listMeasurements)
+      .mockResolvedValueOnce(
+        ok(makeListResponse([latestMeasurement, oldMeasurement], [WEIGHT_TYPE])),
+      )
+      // 開始日変更後（to 未指定のため対象も含まれる）
+      .mockResolvedValueOnce(
+        ok(makeListResponse([latestMeasurement, oldMeasurement], [WEIGHT_TYPE])),
+      )
+      // 終了日変更後の再取得。画面には対象が表示されている。
+      .mockResolvedValueOnce(ok(makeListResponse([oldMeasurement], [WEIGHT_TYPE])))
+      // 409 後の listQuery 再取得。ここでは対象が含まれないケースを想定し、
+      // 別途 typeId + measuredAt の対象特定クエリで rowVersion を取得する分岐を検証する。
+      .mockResolvedValueOnce(ok(makeListResponse([], [WEIGHT_TYPE])))
+      // 対象特定クエリ: typeId + measuredAt で必ず 1 件に特定
+      .mockResolvedValueOnce(ok(makeListResponse([refreshedOld], [WEIGHT_TYPE], { limit: 1 })))
+      // 再試行成功後の load()
+      .mockResolvedValueOnce(ok(makeListResponse([latestMeasurement, updatedOld], [WEIGHT_TYPE])));
+    vi.mocked(api.listGoals).mockResolvedValue(ok(makeGoalsResponse()));
+    vi.mocked(api.saveMeasurement)
+      .mockResolvedValueOnce(err("MEASUREMENT_CONFLICT", "他の利用者が更新しました。", 409))
+      .mockResolvedValueOnce(
+        ok({ measurement: updatedOld, outcome: "updated" as const, derivedBmi: null }),
+      );
+
+    render(<MeasurementsPage />);
+    await waitFor(() => expect(screen.getByText("60kg")).toBeInTheDocument());
+
+    // 日付フィルタで古い記録のみ表示
+    fireEvent.change(screen.getByLabelText("開始日"), { target: { value: "2020-01-01" } });
+    fireEvent.change(screen.getByLabelText("終了日"), { target: { value: "2020-01-01" } });
+    await waitFor(() => expect(screen.queryByText("62.4kg")).not.toBeInTheDocument());
+
+    // 古い記録を編集
+    fireEvent.click(screen.getByRole("button", { name: "編集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "記録を編集" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByLabelText("単位")).toHaveValue("kg"));
+
+    const valueInput = screen.getByLabelText("値") as HTMLInputElement;
+    fireEvent.change(valueInput, { target: { value: "61" } });
+    await waitFor(() => expect(valueInput).toHaveValue(61));
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => alert.textContent?.includes("他の画面や操作でデータが更新されました")),
+      ).toBe(true),
+    );
+
+    // 対象特定クエリが実際に呼ばれ、limit:1 かつ typeId + from/to が指定されている
+    await waitFor(() => {
+      const calls = vi.mocked(api.listMeasurements).mock.calls;
+      const pinpointCall = calls.find(
+        (call) =>
+          call[0].typeId === oldMeasurement.typeId &&
+          call[0].from !== undefined &&
+          call[0].to !== undefined &&
+          call[0].limit === 1,
+      );
+      expect(pinpointCall).toBeDefined();
+    });
+
+    // 再試行（expectedRowVersion は対象特定クエリで取得した 2 を使う）
+    fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+    await waitFor(() => expect(screen.getByText("61kg")).toBeInTheDocument());
+    expect(api.saveMeasurement).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        measurement: expect.objectContaining({ expectedRowVersion: 2 }),
       }),
     );
   });
