@@ -39,7 +39,11 @@ const columnList = (columns: string | undefined): string =>
         .map((column) => identifier(column.trim()))
         .join(", ");
 
-type Filter = { readonly column: string; readonly op: "eq" | "gte" | "lte" | "is"; value: unknown };
+type Filter = {
+  readonly column: string;
+  readonly op: "eq" | "gte" | "lte" | "is" | "in";
+  value: unknown;
+};
 
 type PostgresLikeError = {
   code?: string;
@@ -91,6 +95,10 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
               throw new Error("only `is(column, null)` is supported");
             }
             return `${column} is null`;
+          }
+          if (filter.op === "in") {
+            // PostgREST の `.in()`。空配列でも成立するよう `= any(...)` で書く。
+            return `${column} = any(${placeholder(filter.value)})`;
           }
           const operator = filter.op === "eq" ? "=" : filter.op === "gte" ? ">=" : "<=";
           return `${column} ${operator} ${placeholder(filter.value)}`;
@@ -182,6 +190,7 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
       gte: addFilter("gte"),
       lte: addFilter("lte"),
       is: addFilter("is"),
+      in: addFilter("in"),
       or() {
         throw new Error("or() is not supported by the PGlite-backed client");
       },
@@ -209,9 +218,17 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
     auth: {
       getUser: async () => ({ data: { user: { id: userId } }, error: null }),
     },
-    rpc: async (name: string) => {
+    rpc: async (name: string, args?: Record<string, unknown>) => {
       try {
-        const rows = await run(`select * from public.${identifier(name)}()`, []);
+        // 名前付き引数（`f(p_a => $1, ...)`）で呼ぶ。PostgREST と同じ渡し方。
+        const entries = Object.entries(args ?? {});
+        const params = entries.map(([, value]) =>
+          value !== null && typeof value === "object" ? JSON.stringify(value) : value,
+        );
+        const argumentList = entries
+          .map(([key], index) => `${identifier(key)} => $${index + 1}`)
+          .join(", ");
+        const rows = await run(`select * from public.${identifier(name)}(${argumentList})`, params);
         // スカラーを返す関数（`is_active_user()` など）は1列1行になる。
         const first = rows[0];
         if (rows.length === 1 && first !== undefined && Object.keys(first).length === 1) {

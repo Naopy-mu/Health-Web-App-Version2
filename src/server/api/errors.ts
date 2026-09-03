@@ -50,6 +50,24 @@ export const API_ERROR_CODES = {
   MEASUREMENT_TYPE_CONFLICT: "MEASUREMENT_TYPE_CONFLICT",
   /** 409: 未達成の測定目標が既にある、または版番号不一致（実装仕様書 5.3節）。 */
   MEASUREMENT_GOAL_CONFLICT: "MEASUREMENT_GOAL_CONFLICT",
+  /** 404: 飲み物・症状の種別が所有者スコープに見つからない（実装仕様書 5.5節）。 */
+  WELLNESS_TYPE_NOT_FOUND: "WELLNESS_TYPE_NOT_FOUND",
+  /** 400: アーカイブ済みの飲み物・症状種別へ新規登録しようとした（実装仕様書 5.5節）。 */
+  WELLNESS_TYPE_ARCHIVED: "WELLNESS_TYPE_ARCHIVED",
+  /** 400: 既定カタログで予約された項目キーをカスタム種別に使おうとした（実装仕様書 5.5節）。 */
+  WELLNESS_TYPE_KEY_RESERVED: "WELLNESS_TYPE_KEY_RESERVED",
+  /** 400: カスタム症状種別が上限（30件）に達している（実装仕様書 5.5節）。 */
+  WELLNESS_TYPE_LIMIT_REACHED: "WELLNESS_TYPE_LIMIT_REACHED",
+  /** 400: 睡眠の日時が順序・24時間・覚醒時間の規則に反する（実装仕様書 5.5節）。 */
+  WELLNESS_INVALID_SLEEP_RANGE: "WELLNESS_INVALID_SLEEP_RANGE",
+  /** 409: 睡眠・水分・体調の記録の版番号不一致、または対象が存在しない（実装仕様書 6.4節）。 */
+  WELLNESS_CONFLICT: "WELLNESS_CONFLICT",
+  /** 409: 同一の所有者・種別・記録日時の重複登録（実装仕様書 5.5節）。 */
+  WELLNESS_DUPLICATE_CONFLICT: "WELLNESS_DUPLICATE_CONFLICT",
+  /** 409: 有効な目標が既にある、開始日が重複、または版番号不一致（実装仕様書 5.5節）。 */
+  WELLNESS_GOAL_CONFLICT: "WELLNESS_GOAL_CONFLICT",
+  /** 409: 飲み物・症状種別の項目キー重複、または版番号不一致（実装仕様書 5.5節）。 */
+  WELLNESS_TYPE_CONFLICT: "WELLNESS_TYPE_CONFLICT",
   /** 413: リクエストボディが64KiBを超えた（実装仕様書 7章）。 */
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   /** 501: 後続フェーズで実装する骨格（実装仕様書 5.1節の削除フロー）。 */
@@ -186,5 +204,81 @@ export const measurementGoalConflict = () =>
   apiError(
     API_ERROR_CODES.MEASUREMENT_GOAL_CONFLICT,
     "この測定種別には未達成の目標が既に存在します。既存の目標を更新してください。",
+    409,
+  );
+
+/* 睡眠・水分・体調（実装仕様書 5.5節）。詳細は docs/api/wellness.md のエラーコード一覧。 */
+
+export const wellnessTypeNotFound = () =>
+  apiError(API_ERROR_CODES.WELLNESS_TYPE_NOT_FOUND, "指定された種別が見つかりません。", 404);
+
+/**
+ * 実装仕様書 5.5節（5.3節の方針を踏襲）:
+ * アーカイブ済みの種別へ新規の記録を登録することは拒否する。既存記録の訂正は妨げない。
+ */
+export const wellnessTypeArchived = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_TYPE_ARCHIVED,
+    "アーカイブ済みの種別には新しく登録できません。アーカイブを解除してからお試しください。",
+    400,
+  );
+
+/**
+ * 実装仕様書 5.5節: 既定カタログのキーは既定種別（`is_default=true`）専用。
+ * カスタム種別が同じキーを名乗ると既定種別の偽装になるため拒否する。
+ */
+export const wellnessTypeKeyReserved = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_TYPE_KEY_RESERVED,
+    "この項目キーは既定の種別で予約されています。別のキーを指定してください。",
+    400,
+  );
+
+/** 実装仕様書 5.5節「症状（既定13種＋任意30件まで）」。 */
+export const wellnessTypeLimitReached = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_TYPE_LIMIT_REACHED,
+    "カスタム症状は30件までです。不要な症状をアーカイブしてからお試しください。",
+    400,
+  );
+
+/**
+ * 実装仕様書 5.5節:
+ * > 就床≦入眠＜起床≦離床の順序、24時間超や覚醒時間が睡眠時間以上となる値を拒否する。
+ */
+export const wellnessInvalidSleepRange = (message: string) =>
+  apiError(API_ERROR_CODES.WELLNESS_INVALID_SLEEP_RANGE, message, 400);
+
+/**
+ * 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
+ * 「行が存在しない場合と版番号が古い場合を区別せず 409 にする」。
+ * 他利用者の行の存在有無を漏らさないため、文言でも区別しない。
+ */
+export const wellnessConflict = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_CONFLICT,
+    "記録が他の操作で更新されています。最新の内容を取得してからやり直してください。",
+    409,
+  );
+
+export const wellnessDuplicateConflict = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_DUPLICATE_CONFLICT,
+    "同じ種別・日時の記録が既に存在します。",
+    409,
+  );
+
+export const wellnessGoalConflict = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_GOAL_CONFLICT,
+    "目標を保存できませんでした。終了日の無い目標が既にあるか、同じ開始日の目標が存在します。",
+    409,
+  );
+
+/** 項目キーの重複（作成）と版番号不一致・対象なし（更新）の双方で使う。 */
+export const wellnessTypeConflict = () =>
+  apiError(
+    API_ERROR_CODES.WELLNESS_TYPE_CONFLICT,
+    "種別を保存できませんでした。同じ項目キーの種別が既にあるか、他の操作で更新されています。",
     409,
   );
