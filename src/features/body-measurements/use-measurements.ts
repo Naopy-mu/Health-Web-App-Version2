@@ -360,11 +360,13 @@ export function useMeasurements() {
 
       const result = await saveMeasurement(request);
       if (!result.ok) {
+        // 409 後の対象特定クエリは、DB 上の対象行を特定するため
+        // 送信値ではなく編集開始時の永続値（typeId / measuredAt）を使う（新規-9）。
         await handleMutationError(result.error, result.status, {
           kind: "measurement",
           id: input.id ?? "",
-          typeId: input.typeId,
-          measuredAt: input.measuredAt,
+          typeId: editingMeasurement?.typeId ?? input.typeId,
+          measuredAt: editingMeasurement?.measuredAt ?? input.measuredAt,
         });
         setLoadingState("idle");
         return false;
@@ -374,7 +376,7 @@ export function useMeasurements() {
       setLoadingState("idle");
       return true;
     },
-    [handleMutationError, load],
+    [handleMutationError, load, editingMeasurement],
   );
 
   const removeMeasurement = useCallback(
