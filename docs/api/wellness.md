@@ -207,7 +207,7 @@ const outcome = interpretWellnessRefetch(strategy, data.entries);
 | `WELLNESS_TYPE_NOT_FOUND`      | 404  | `beverageTypeId` / `symptomTypeId` / 更新対象の種別が所有者スコープに無い                                            | 種別一覧を取り直す                     |
 | `WELLNESS_TYPE_ARCHIVED`       | 400  | アーカイブ済みの種別へ新規の記録を登録しようとした                                                                   | アーカイブ解除を促す（8.3節）          |
 | `WELLNESS_TYPE_KEY_RESERVED`   | 400  | 既定カタログの項目キーをカスタム種別に使おうとした                                                                   | 別のキーを促す（2.3節）                |
-| `WELLNESS_TYPE_LIMIT_REACHED`  | 400  | カスタム症状種別が30件に達している                                                                                   | 不要な症状のアーカイブを促す           |
+| `WELLNESS_TYPE_LIMIT_REACHED`  | 400  | 有効なカスタム症状種別が30件に達している（作成・アーカイブ解除の両方）                                               | 不要な症状のアーカイブを促す           |
 | `WELLNESS_CONFLICT`            | 409  | 記録の版番号不一致、または対象行が無い（更新・削除）                                                                 | 1.7節の手順で復帰する                  |
 | `WELLNESS_DUPLICATE_CONFLICT`  | 409  | 同一の所有者・種別・記録日時の記録が既にある                                                                         | 日時を変えるか既存を編集               |
 | `WELLNESS_GOAL_CONFLICT`       | 409  | 終了日の無い目標が既にある／同じ開始日の目標が既にある／目標の版番号不一致                                           | 既存の目標を締めてから作るよう促す     |
@@ -327,7 +327,8 @@ TypeScript からは `DEFAULT_BEVERAGE_TYPES` / `DEFAULT_SYMPTOM_TYPES`
 DB のカタログとの一致は `tests/db/wellness.test.ts` が検証している。
 
 **カスタム症状種別は所有者ごとに30件まで**（実装仕様書 5.5節「既定13種＋任意30件まで」）。
-超えると 400 `WELLNESS_TYPE_LIMIT_REACHED`。定数は `CUSTOM_SYMPTOM_TYPE_MAX`。
+数えるのは**有効な**（`archivedAt === null`）種別だけで、新規作成とアーカイブ解除の
+どちらも超えると 400 `WELLNESS_TYPE_LIMIT_REACHED`。定数は `CUSTOM_SYMPTOM_TYPE_MAX`。
 
 ---
 
@@ -598,6 +599,12 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 
 アーカイブ済み種別でも**既存記録の更新は妨げない**（アーカイブ前の記録を後から直せる）。
 
+種別の状態を見るのは「まだ適用されていない操作」に対してだけ。**適用済みの
+`clientMutationId` による再送は、そのあとに種別がアーカイブされていても
+`idempotent_replay` の成功応答を返す**（1.6節の契約が優先する）。保存に成功した
+あとで利用者がその種別をアーカイブし、送信キューに残っていた同じキーが後から
+届く——という順序はオフライン同期（実装仕様書 8章）では普通に起こる。
+
 ---
 
 ## 6. 体調記録
@@ -684,6 +691,10 @@ DB の CHECK 制約も同じ判定をする（最終防衛線）。
 | 同じ `symptomTypeId` を重複して送った | 400 `INVALID_REQUEST`             |
 | 同じ記録日時の記録が既にある          | 409 `WELLNESS_DUPLICATE_CONFLICT` |
 | 版番号不一致・対象なし                | 409 `WELLNESS_CONFLICT`           |
+
+症状種別の状態を見るのは「まだ適用されていない操作」に対してだけ。水分記録と同じく、
+**適用済みの `clientMutationId` による再送は、そのあとに症状種別がアーカイブされて
+いても当時の成功応答を返す**（5.3節と同じ理由）。
 
 > **なぜ体調記録だけ `clientMutationId` が必須なのか**
 >
@@ -882,6 +893,11 @@ DB のトリガーが seed 以外からの書き込みを拒否する（実装�
 > **30件の上限はアーカイブ済みを数えない。** エラー文言が案内するとおり、
 > 不要なカスタム症状を `archived: true` にすれば枠が空いて新しい症状を追加できる
 > （既定13種は別枠で、この上限には関係しない）。
+>
+> **アーカイブ解除（`archived: false`）にも同じ上限がかかる。** 有効な症状が既に
+> 30件あるときの解除は 400 `WELLNESS_TYPE_LIMIT_REACHED` になる（作成と同じ
+> エラー）。解除したい症状があるときは、先に別の症状をアーカイブして枠を空ける。
+> DB のトリガーも作成と解除の両方を検査する（migration 20260903000100）。
 
 ### 8.3 種別の更新・アーカイブ／解除
 
@@ -910,7 +926,9 @@ DB のトリガーが seed 以外からの書き込みを拒否する（実装�
 - アーカイブしても**過去の記録は消えない**。一覧にはアーカイブ済みも含めて返るので、
   画面側は `archivedAt !== null` を入力候補から外し、履歴の表示には引き続き使う。
 - アーカイブ済み種別への**新規登録**は 400 `WELLNESS_TYPE_ARCHIVED`。
-  既存記録の更新は妨げない。
+  既存記録の更新と、適用済み `clientMutationId` の再送は妨げない（5.3節・6.2節）。
+- カスタム症状の**アーカイブ解除**は、有効な症状が30件あると
+  400 `WELLNESS_TYPE_LIMIT_REACHED`（8.2節）。
 - 対象が所有者の種別に無ければ 404 `WELLNESS_TYPE_NOT_FOUND`、
   版番号不一致は 409 `WELLNESS_TYPE_CONFLICT`。
 

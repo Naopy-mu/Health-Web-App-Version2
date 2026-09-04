@@ -924,18 +924,6 @@ export async function saveHydrationEntry(
   clientMutationId: string | undefined,
   catalog: WellnessCatalog,
 ): Promise<GuardResult<{ entry: HydrationEntry; outcome: MutationOutcome }>> {
-  const type = catalog.beverages.byId.get(input.beverageTypeId);
-  if (type === undefined) {
-    return { ok: false, response: wellnessTypeNotFound() };
-  }
-  // 実装仕様書 5.5節（5.3節の方針を踏襲）: アーカイブ済み種別への新規登録は拒否。
-  // 既存記録の訂正（更新）は妨げない。
-  if (input.id === undefined && type.archivedAt !== null) {
-    return { ok: false, response: wellnessTypeArchived() };
-  }
-
-  const label = beverageLabel(type);
-
   const replay = async (): Promise<GuardResult<HydrationEntry | null>> => {
     if (clientMutationId === undefined) {
       return { ok: true, value: null };
@@ -962,6 +950,13 @@ export async function saveHydrationEntry(
     };
   };
 
+  // 入力の検査より先に冪等ログを引く（実装仕様書 6.4節 / 8章のオフライン同期）。
+  //
+  // 適用済みの `clientMutationId` は「何世代前でも同じ成功応答を返す」契約であり、
+  // その判断に**現在**の種別の状態を混ぜてはならない。先に種別を検査していると、
+  // 保存に成功したあとで利用者がその飲み物種別をアーカイブした場合、
+  // 送信キューに残っていた同じキーの再送が 400 になってしまう
+  // （オフライン同期では普通に起こる順序）。
   const first = await replay();
   if (!first.ok) {
     return first;
@@ -969,6 +964,19 @@ export async function saveHydrationEntry(
   if (first.value !== null) {
     return { ok: true, value: { entry: first.value, outcome: "idempotent_replay" } };
   }
+
+  // ここから先は「まだ適用されていない操作」。入力として種別を検査する。
+  const type = catalog.beverages.byId.get(input.beverageTypeId);
+  if (type === undefined) {
+    return { ok: false, response: wellnessTypeNotFound() };
+  }
+  // 実装仕様書 5.5節（5.3節の方針を踏襲）: アーカイブ済み種別への新規登録は拒否。
+  // 既存記録の訂正（更新）は妨げない。
+  if (input.id === undefined && type.archivedAt !== null) {
+    return { ok: false, response: wellnessTypeArchived() };
+  }
+
+  const label = beverageLabel(type);
 
   // カフェイン・アルコールの既定は飲み物種別から取る（実装仕様書 5.5節）。
   const patch = {
@@ -1254,18 +1262,6 @@ export async function saveConditionEntry(
   clientMutationId: string,
   catalog: WellnessCatalog,
 ): Promise<GuardResult<{ entry: ConditionEntry; outcome: MutationOutcome }>> {
-  // 症状種別は所有者のカタログに無ければ 404、アーカイブ済みなら 400。
-  // DB のトリガーも同じ判定をする（最終防衛線）。
-  for (const symptom of input.symptoms ?? []) {
-    const type = catalog.symptoms.byId.get(symptom.symptomTypeId);
-    if (type === undefined) {
-      return { ok: false, response: wellnessTypeNotFound() };
-    }
-    if (type.archivedAt !== null) {
-      return { ok: false, response: wellnessTypeArchived() };
-    }
-  }
-
   const replay = async (): Promise<GuardResult<ConditionEntryRow | null>> =>
     findMutationSnapshot<ConditionEntryRow>(
       supabase,
@@ -1285,6 +1281,12 @@ export async function saveConditionEntry(
     return { ok: true, value: { entry: toConditionEntry(row, symptoms.value), outcome } };
   };
 
+  // 入力の検査より先に冪等ログを引く（実装仕様書 6.4節 / 8章のオフライン同期）。
+  //
+  // 適用済みの `clientMutationId` は「何世代前でも同じ成功応答を返す」契約。
+  // 種別を先に検査していると、保存に成功したあとで利用者がその症状種別を
+  // アーカイブした場合、送信キューに残っていた同じキーの再送が 400 になり
+  // 契約を破る（オフライン同期では普通に起こる順序）。
   const first = await replay();
   if (!first.ok) {
     return first;
@@ -1294,6 +1296,19 @@ export async function saveConditionEntry(
     // 症状リンクは親と同一トランザクションで確定しているので、
     // 「親だけ保存できた」状態を救うための貼り直しは要らない。
     return finish(first.value, "idempotent_replay");
+  }
+
+  // ここから先は「まだ適用されていない操作」。入力として症状種別を検査する。
+  // 所有者のカタログに無ければ 404、アーカイブ済みなら 400。
+  // DB のトリガーも同じ判定をする（最終防衛線）。
+  for (const symptom of input.symptoms ?? []) {
+    const type = catalog.symptoms.byId.get(symptom.symptomTypeId);
+    if (type === undefined) {
+      return { ok: false, response: wellnessTypeNotFound() };
+    }
+    if (type.archivedAt !== null) {
+      return { ok: false, response: wellnessTypeArchived() };
+    }
   }
 
   const { data, error } = await supabase.rpc(SAVE_CONDITION_ENTRY_RPC, {

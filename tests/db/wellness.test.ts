@@ -357,6 +357,85 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
     expect(rows[0]?.count).toBe("30");
   });
 
+  it("アーカイブ解除でも上限30件を超えられない（UPDATE も上限を検査する）", async () => {
+    // 上限の検査が INSERT だけだと、次の手順で有効な症状が31件になってしまう:
+    //   30件作る → 1件アーカイブ → 代替を1件作る → 最初の1件のアーカイブを解除。
+    const restoreUser = await signUp(db, "symptom-restore@example.test");
+    await asAuthenticated(db, restoreUser, async () => {
+      await db.query("select public.seed_default_symptom_types()");
+      for (let index = 0; index < 30; index += 1) {
+        await db.query(
+          `insert into public.symptom_types (owner_id, symptom_key, display_name)
+           values ($1, $2, $3)`,
+          [restoreUser, `restorable_${index}`, `復帰候補${index}`],
+        );
+      }
+
+      // 1件アーカイブして枠を空け、代替の1件を作る（ここまでは有効30件）。
+      await db.query(
+        `update public.symptom_types set archived_at = now()
+         where owner_id = $1 and symptom_key = 'restorable_0'`,
+        [restoreUser],
+      );
+      await db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'restore_replacement', '代替')`,
+        [restoreUser],
+      );
+    });
+
+    // 枠が無い状態でのアーカイブ解除は上限違反として拒否される。
+    expect(
+      await expectRejection(() =>
+        asAuthenticated(db, restoreUser, async () =>
+          db.query(
+            `update public.symptom_types set archived_at = null
+             where owner_id = $1 and symptom_key = 'restorable_0'`,
+            [restoreUser],
+          ),
+        ),
+      ),
+    ).toContain("limited to 30 per owner");
+
+    // 有効な症状は30件のまま（解除は1件も通っていない）。
+    const capped = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.symptom_types
+       where owner_id = $1 and not is_default and archived_at is null`,
+      [restoreUser],
+    );
+    expect(capped.rows[0]?.count).toBe("30");
+
+    // アーカイブ済みのままの更新（表示名の変更）は上限に関係なく通る。
+    await asAuthenticated(db, restoreUser, async () => {
+      await db.query(
+        `update public.symptom_types set display_name = '復帰候補0（改名）'
+         where owner_id = $1 and symptom_key = 'restorable_0'`,
+        [restoreUser],
+      );
+    });
+
+    // 別の1件をアーカイブして枠を空ければ、案内どおり解除できる。
+    await asAuthenticated(db, restoreUser, async () => {
+      await db.query(
+        `update public.symptom_types set archived_at = now()
+         where owner_id = $1 and symptom_key = 'restore_replacement'`,
+        [restoreUser],
+      );
+      await db.query(
+        `update public.symptom_types set archived_at = null
+         where owner_id = $1 and symptom_key = 'restorable_0'`,
+        [restoreUser],
+      );
+    });
+
+    const restored = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.symptom_types
+       where owner_id = $1 and not is_default and archived_at is null`,
+      [restoreUser],
+    );
+    expect(restored.rows[0]?.count).toBe("30");
+  });
+
   it("カスタム症状種別は30件まで", async () => {
     const capUser = await signUp(db, "symptom-cap@example.test");
     await asAuthenticated(db, capUser, async () => {

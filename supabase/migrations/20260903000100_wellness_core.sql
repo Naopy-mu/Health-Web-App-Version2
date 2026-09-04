@@ -729,12 +729,26 @@ begin
   -- 案内は「不要な症状をアーカイブしてからお試しください」（`errors.ts` の
   -- `wellnessTypeLimitReached`）であり、アーカイブ済みも数えていると案内どおりに
   -- 操作しても枠が空かず、利用者が詰んでしまう。
-  if tg_table_name = 'symptom_types' and tg_op = 'INSERT' and not new.is_default then
+  --
+  -- 検査するのは「有効なカスタム症状が1件増える瞬間」。INSERT だけを見ていると
+  -- アーカイブ解除で上限を破れてしまう:
+  --   30件作る → 1件アーカイブ（有効29件）→ 代替を1件作る（有効30件）
+  --   → 最初の1件のアーカイブを解除（有効31件）
+  -- そこで、アーカイブ解除（archived_at を NULL へ戻す UPDATE）も同じ検査を通す。
+  -- 逆に、アーカイブ済みのまま入る／留まる行は有効件数を増やさないので数えない。
+  if tg_table_name = 'symptom_types'
+    and not new.is_default
+    and new.archived_at is null
+    and (tg_op = 'INSERT' or old.archived_at is not null)
+  then
     select pg_catalog.count(*) into custom_count
     from public.symptom_types s
     where s.owner_id = new.owner_id
       and not s.is_default
-      and s.archived_at is null;
+      and s.archived_at is null
+      -- BEFORE UPDATE の時点では自分自身がまだ「アーカイブ済み」で見えている。
+      -- 数え漏らし・二重計上のどちらも起きないよう、対象行は明示的に除く。
+      and s.id is distinct from new.id;
 
     if custom_count >= 30 then
       raise exception 'custom symptom types are limited to 30 per owner'
@@ -747,7 +761,7 @@ end;
 $$;
 
 comment on function public.tg_wellness_reference_guard() is
-  '実装仕様書 5.5節: 飲み物・症状の既定カタログを偽装・改ざんから守り、カスタム症状種別を30件（アーカイブ済みを除く）までに抑える。';
+  '実装仕様書 5.5節: 飲み物・症状の既定カタログを偽装・改ざんから守り、有効なカスタム症状種別を30件（アーカイブ済みを除く）までに抑える。上限は新規作成とアーカイブ解除の両方で検査する。';
 
 revoke all on function public.tg_wellness_reference_guard() from public, anon, authenticated;
 

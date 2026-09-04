@@ -223,6 +223,108 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
     expect(replay.entry.amountMl).toBe(200);
   });
 
+  it("種別を後からアーカイブしても、適用済みキーの再送は成功応答を返す", async () => {
+    // 実装仕様書 8章のオフライン同期では「保存が成功 → 利用者がその種別を
+    // アーカイブ → 送信キューに残っていた同じキーが再送される」が普通に起こる。
+    // 適用済みの clientMutationId は**現在**の種別の状態に関わらず、当時の
+    // 成功応答をそのまま返さなければならない（実装仕様書 6.4節）。
+    await db.query(
+      `insert into public.beverage_types (owner_id, beverage_key, display_name, default_unit)
+       values ($1, 'replay_beverage', '再送用ドリンク', 'ml')`,
+      [userId],
+    );
+    await db.query(
+      `insert into public.symptom_types (owner_id, symptom_key, display_name)
+       values ($1, 'replay_symptom', '再送用症状')`,
+      [userId],
+    );
+
+    const before = await expectOk(await loadCatalogs(supabase, userId));
+    const beverageTypeId = before.beverages.byKey.get("replay_beverage")?.id ?? "";
+    const symptomTypeId = before.symptoms.byKey.get("replay_symptom")?.id ?? "";
+    expect(beverageTypeId).not.toBe("");
+    expect(symptomTypeId).not.toBe("");
+
+    const hydrationKey = "ffff0001-0000-4000-8000-000000000001";
+    const hydrationInput = {
+      beverageTypeId,
+      recordedAt: "2026-11-02T09:00:00.000Z",
+      unit: "ml" as const,
+      amount: 250,
+    };
+    const hydration = await expectOk(
+      await saveHydrationEntry(supabase, userId, hydrationInput, hydrationKey, before),
+    );
+    expect(hydration.outcome).toBe("created");
+
+    const conditionMutationKey = conditionKey();
+    const conditionInput = {
+      recordedAt: "2026-11-02T21:00:00.000Z",
+      overallScore: 7,
+      symptoms: [{ symptomTypeId }],
+    };
+    const condition = await expectOk(
+      await saveConditionEntry(supabase, userId, conditionInput, conditionMutationKey, before),
+    );
+    expect(condition.outcome).toBe("created");
+
+    // 保存後に両方の種別をアーカイブする。
+    await db.query("update public.beverage_types set archived_at = now() where id = $1", [
+      beverageTypeId,
+    ]);
+    await db.query("update public.symptom_types set archived_at = now() where id = $1", [
+      symptomTypeId,
+    ]);
+
+    const after = await expectOk(await loadCatalogs(supabase, userId));
+    expect(after.beverages.byId.get(beverageTypeId)?.archivedAt).not.toBeNull();
+    expect(after.symptoms.byId.get(symptomTypeId)?.archivedAt).not.toBeNull();
+
+    // 再送はアーカイブ済み判定に弾かれず、当時のスナップショットを返す。
+    const hydrationReplay = await expectOk(
+      await saveHydrationEntry(supabase, userId, hydrationInput, hydrationKey, after),
+    );
+    expect(hydrationReplay.outcome).toBe("idempotent_replay");
+    expect(hydrationReplay.entry.id).toBe(hydration.entry.id);
+    expect(hydrationReplay.entry.rowVersion).toBe(hydration.entry.rowVersion);
+    expect(hydrationReplay.entry.amountMl).toBe(hydration.entry.amountMl);
+
+    const conditionReplay = await expectOk(
+      await saveConditionEntry(supabase, userId, conditionInput, conditionMutationKey, after),
+    );
+    expect(conditionReplay.outcome).toBe("idempotent_replay");
+    expect(conditionReplay.entry.id).toBe(condition.entry.id);
+    expect(conditionReplay.entry.rowVersion).toBe(condition.entry.rowVersion);
+    expect(conditionReplay.entry.symptoms.map((symptom) => symptom.symptomKey)).toEqual([
+      "replay_symptom",
+    ]);
+
+    // 未適用のキーによる新規登録は、これまでどおりアーカイブ済みで 400。
+    const rejectedHydration = await expectError(
+      await saveHydrationEntry(
+        supabase,
+        userId,
+        { ...hydrationInput, recordedAt: "2026-11-03T09:00:00.000Z" },
+        "ffff0001-0000-4000-8000-000000000002",
+        after,
+      ),
+    );
+    expect(rejectedHydration.status).toBe(400);
+    expect(rejectedHydration.code).toBe("WELLNESS_TYPE_ARCHIVED");
+
+    const rejectedCondition = await expectError(
+      await saveConditionEntry(
+        supabase,
+        userId,
+        { ...conditionInput, recordedAt: "2026-11-03T21:00:00.000Z" },
+        conditionKey(),
+        after,
+      ),
+    );
+    expect(rejectedCondition.status).toBe(400);
+    expect(rejectedCondition.code).toBe("WELLNESS_TYPE_ARCHIVED");
+  });
+
   it("目標: 冪等キーの再送は 409 にならない", async () => {
     const created = "cccc0001-0000-4000-8000-000000000001";
     const goal = { targetSleepMinutes: 420, startDate: "2026-10-01" };
