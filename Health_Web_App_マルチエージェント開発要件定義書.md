@@ -225,10 +225,10 @@ Phase 4以降、各機能の一次担当・レビュー担当は3章の表を参
 | Phase 2 | 完了 | feature/phase2-auth-foundation。Codexレビュー2往復（メール確認フロー不整合、proxy状態未確認、same-origin迂回のCritical 3件）を経てdevelop統合済み（04dc297） |
 | Phase 3a（身体測定・バックエンド） | 完了 | feature/phase3a-measurements-backend。Codexレビュー3往復（既定種別偽装防止、冪等性の履歴化、BMI単位是正等）を経てdevelop統合済み（de33f2c） |
 | Phase 3b（身体測定・フロントエンド） | 完了 | feature/phase3b-measurements-frontend。Claude Codeレビュー6往復（409競合からの回復不能パターンが複数条件で繰り返し発見・修正）を経てdevelop統合済み（38e10b2） |
-| Phase 4-1a（睡眠・水分・体調・バックエンド） | レビュー待ち | feature/phase4-1a-wellness-backend（ed68d16）。Phase3bの教訓（409後の対象特定失敗）を設計段階で回避（所有者＋記録日時＋種別の一意制約）。Codexレビュー待ち |
+| Phase 4-1a（睡眠・水分・体調・バックエンド） | 完了 | feature/phase4-1a-wellness-backend（c3243b3）。Phase3bの教訓（409後の対象特定失敗）を設計段階で回避（所有者＋記録日時＋種別の一意制約）。Codexレビュー3往復（409対象特定・sleep制約・トランザクション原子性、復元時のアーカイブ上限、独自種別上限チェックの直列化と冪等再実行）を経てdevelop統合済み（ddadb8d） |
 | Phase 4〜（それ以降） | 未着手 | 9.1節の分業方針（バックエンド: Claude Code／フロントエンド: Kimi K2.7 Code／レビュー: Codex）で進める |
 
-develop HEAD: `38e10b2`（Phase 3b統合時点。Phase 4-1aはレビュー中のため未統合）
+develop HEAD: `ddadb8d`（Phase 4-1a統合時点）
 
 ---
 
