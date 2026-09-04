@@ -128,6 +128,19 @@ const violates = (error: PostgrestError, fragment: string): boolean =>
   `${error.message} ${error.details ?? ""}`.includes(fragment);
 
 /**
+ * 「アーカイブ済み種別への新規登録」を DB のガードトリガーが拒否したか
+ * （migration 20260903000100 の `tg_wellness_entry_reference_guard()`）。
+ *
+ * 冪等再送では**一意制約違反（23505）と同じ扱いが要る**。同じ
+ * `clientMutationId` の再送が、先行リクエストの保存とその後の種別アーカイブが
+ * 確定した直後に INSERT へ入ると、一意制約より先に BEFORE トリガーが反応して
+ * 23514 になるためで、そのまま 400 を返すと「適用済みのキーは何世代前でも
+ * 同じ成功応答を返す」契約（実装仕様書 6.4節）を破ってしまう。
+ */
+const isArchivedTypeViolation = (error: PostgrestError): boolean =>
+  error.code === PG_CHECK_VIOLATION && violates(error, "is archived");
+
+/**
  * 想定内の PostgreSQL エラーを実装仕様書 7章の応答へ写す。
  * 想定外は 400（`INVALID_REQUEST`）にまとめ、DB のメッセージを外へ出さない
  * （実装仕様書 9.2節: 健康データ・内部情報をログや応答へ出さない）。
@@ -1032,12 +1045,29 @@ export async function saveHydrationEntry(
     .maybeSingle();
 
   if (error) {
-    if (error.code === PG_UNIQUE_VIOLATION) {
+    // 冪等ログを引き直すべき失敗は2種類ある。どちらも「先行リクエストが先に
+    // 通ったせいで、再送側の INSERT が弾かれた」形で、409/400 ではなく
+    // `idempotent_replay` が正しい応答になり得る。
+    //
+    //   - 23505: 冪等キーの一意制約、または種別・記録日時の重複制約。
+    //   - 23514: 種別アーカイブのガードトリガー。冒頭のログ検索を終えた直後に
+    //            先行リクエストの保存と種別のアーカイブが確定すると、BEFORE
+    //            トリガーが一意制約より先に反応してこちらになる。
+    //
+    // 引き直して見つからなければ「本当に未適用の操作」なので、従来どおりの
+    // エラーを返す（重複は 409、アーカイブ済み種別への新規登録は 400）。
+    if (error.code === PG_UNIQUE_VIOLATION || isArchivedTypeViolation(error)) {
       const retry = await replay();
       if (retry.ok && retry.value !== null) {
         return { ok: true, value: { entry: retry.value, outcome: "idempotent_replay" } };
       }
-      return { ok: false, response: wellnessDuplicateConflict() };
+      return {
+        ok: false,
+        response:
+          error.code === PG_UNIQUE_VIOLATION
+            ? wellnessDuplicateConflict()
+            : mapUnexpectedError(error),
+      };
     }
     return { ok: false, response: mapUnexpectedError(error) };
   }

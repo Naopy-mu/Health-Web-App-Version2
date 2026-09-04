@@ -63,12 +63,34 @@ const toPostgrestError = (cause: unknown) => {
   };
 };
 
-export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClient {
-  const run = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> =>
-    asAuthenticated(db, userId, async () => {
+/**
+ * 同時実行の再現用フック。
+ *
+ * PGlite は接続が1本なので、2つのリクエストを本当に並行させることはできない。
+ * その代わり「片方が SQL を1本投げ終えた**直後**に、もう片方を最後まで進める」
+ * という割り込み点をテストから差し込めるようにする。リポジトリの手順のどの
+ * 隙間で競合が起きるかを、待ち合わせで決め打ちできる。
+ *
+ * `afterQuery` は接続が空いた状態（`asAuthenticated` の外）で呼ばれるので、
+ * 中から別のクライアントで自由に問い合わせてよい。
+ */
+export type PglitePostgrestHooks = {
+  readonly afterQuery?: (sql: string) => Promise<void>;
+};
+
+export function createPglitePostgrest(
+  db: PGlite,
+  userId: string,
+  hooks: PglitePostgrestHooks = {},
+): SupabaseClient {
+  const run = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> => {
+    const rows = await asAuthenticated(db, userId, async () => {
       const result = await db.query<Record<string, unknown>>(sql, params);
       return result.rows;
     });
+    await hooks.afterQuery?.(sql);
+    return rows;
+  };
 
   const createBuilder = (
     table: string,

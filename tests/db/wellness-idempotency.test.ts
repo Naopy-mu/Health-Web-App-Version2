@@ -62,6 +62,15 @@ async function expectError(
 
 const query = (overrides: Record<string, string> = {}) => wellnessListQuerySchema.parse(overrides);
 
+/** 同時実行テストの待ち合わせ点。片方の進行をもう片方の合図まで止める。 */
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve = (): void => {};
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve: () => resolve() };
+}
+
 /**
  * 体調記録の保存は `clientMutationId` が必須（migration 20260903000500 /
  * `docs/api/wellness.md` 6.2節）。テストごとに重複しないキーを配る。
@@ -323,6 +332,100 @@ describe("睡眠・水分・体調の冪等再送と 409 からの復帰 (実装
     );
     expect(rejectedCondition.status).toBe(400);
     expect(rejectedCondition.code).toBe("WELLNESS_TYPE_ARCHIVED");
+  });
+
+  it("同時実行: 冪等ログを引いた直後に先行リクエストの保存と種別アーカイブが確定しても replay", async () => {
+    // 再送側がログを引き終えた**直後**に、先行リクエストの保存と種別の
+    // アーカイブが確定すると、再送側の INSERT はアーカイブのガードトリガーに
+    // 掴まって 23514（CHECK 制約違反）になる。一意制約違反（23505）だけを
+    // 引き直しの合図にしていると、適用済みのキーなのに 400
+    // `WELLNESS_TYPE_ARCHIVED` を返してしまい、「適用済みの clientMutationId は
+    // 何世代前でも同じ成功応答を返す」契約（実装仕様書 6.4節）が破れる。
+    await db.query(
+      `insert into public.beverage_types (owner_id, beverage_key, display_name, default_unit)
+       values ($1, 'race_beverage', '競合再現用ドリンク', 'ml')`,
+      [userId],
+    );
+
+    const before = await expectOk(await loadCatalogs(supabase, userId));
+    const beverageTypeId = before.beverages.byKey.get("race_beverage")?.id ?? "";
+    expect(beverageTypeId).not.toBe("");
+
+    const mutationId = "ffff0002-0000-4000-8000-000000000001";
+    const input = {
+      beverageTypeId,
+      recordedAt: "2026-11-05T09:00:00.000Z",
+      unit: "ml" as const,
+      amount: 300,
+    };
+
+    // 待ち合わせ点は2つ。
+    //   1. 再送側が冪等ログを引き終えた（＝「未適用」と判断した直後）
+    //   2. 先行リクエストの保存と種別アーカイブが確定した
+    const lookupDone = deferred();
+    const leaderDone = deferred();
+
+    let interrupted = false;
+    const resendClient = createPglitePostgrest(db, userId, {
+      afterQuery: async (sql) => {
+        if (interrupted || !sql.includes("wellness_mutation_log")) {
+          return;
+        }
+        interrupted = true;
+        lookupDone.resolve();
+        await leaderDone.promise;
+      },
+    });
+
+    const leader = (async () => {
+      await lookupDone.promise;
+      const saved = await expectOk(
+        await saveHydrationEntry(supabase, userId, input, mutationId, before),
+      );
+      await db.query("update public.beverage_types set archived_at = now() where id = $1", [
+        beverageTypeId,
+      ]);
+      leaderDone.resolve();
+      return saved;
+    })();
+
+    // 2つのリクエストを同時に走らせる。再送側は上の待ち合わせで、
+    // 「ログ検索は終わったが INSERT はこれから」という窓に置かれる。
+    const [first, resent] = await Promise.all([
+      leader,
+      saveHydrationEntry(resendClient, userId, input, mutationId, before),
+    ]);
+
+    expect(interrupted).toBe(true);
+    expect(first.outcome).toBe("created");
+
+    const replayed = await expectOk(resent);
+    expect(replayed.outcome).toBe("idempotent_replay");
+    expect(replayed.entry.id).toBe(first.entry.id);
+    expect(replayed.entry.rowVersion).toBe(first.entry.rowVersion);
+    expect(replayed.entry.amountMl).toBe(first.entry.amountMl);
+
+    // 記録は1件だけ（再送で二重に入っていない）。
+    const { rows } = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.hydration_entries
+       where owner_id = $1 and beverage_type_id = $2`,
+      [userId, beverageTypeId],
+    );
+    expect(rows[0]?.count).toBe("1");
+
+    // 未適用のキーは引き直しても見つからないので、従来どおりのエラーを返す。
+    // （カタログはアーカイブ前のものなので、判定はDBのガードトリガーが行う。）
+    const rejected = await expectError(
+      await saveHydrationEntry(
+        supabase,
+        userId,
+        { ...input, recordedAt: "2026-11-05T10:00:00.000Z" },
+        "ffff0002-0000-4000-8000-000000000002",
+        before,
+      ),
+    );
+    expect(rejected.status).toBe(400);
+    expect(rejected.code).toBe("WELLNESS_TYPE_ARCHIVED");
   });
 
   it("目標: 冪等キーの再送は 409 にならない", async () => {

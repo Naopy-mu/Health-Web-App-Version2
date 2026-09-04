@@ -741,6 +741,22 @@ begin
     and new.archived_at is null
     and (tg_op = 'INSERT' or old.archived_at is not null)
   then
+    -- 件数を数える前に**所有者単位で直列化する**。
+    --
+    -- 「数えてから入れる」だけでは、同時に走る2つのトランザクションが互いの
+    -- 未コミット行を見られないため上限を破れる:
+    --   有効29件 → T1 と T2 が同時に作成（どちらも29件と観測）→ 両方成功 → 31件
+    -- アーカイブ解除どうし、作成とアーカイブ解除の組み合わせでも同じことが起きる。
+    -- 一意制約では表現できない条件（所有者ごとの件数）なので、DB 側で先に
+    -- 順番を決めるしかない。
+    --
+    -- ロックは所有者IDから導くので、直列化されるのは**同じ所有者への同時変更**
+    -- だけ（他の利用者は待たされない）。トランザクション単位（`_xact_`）なので
+    -- コミット／ロールバックで自動的に解放され、明示的な解放処理は要らない。
+    -- 1トランザクションで取るキーは常にこの1本だけなので、獲得順による
+    -- デッドロックも起こらない。
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(new.owner_id::text));
+
     select pg_catalog.count(*) into custom_count
     from public.symptom_types s
     where s.owner_id = new.owner_id

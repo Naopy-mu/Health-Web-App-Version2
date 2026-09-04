@@ -436,6 +436,169 @@ describe("睡眠・水分・体調のスキーマ (実装仕様書 5.5節)", () 
     expect(restored.rows[0]?.count).toBe("30");
   });
 
+  it("上限検査は所有者単位のロックで直列化される（同時作成・同時解除の競合）", async () => {
+    // 「現在件数を数えてから入れる」だけでは、同時に走る2つのトランザクションが
+    // 互いの未コミット行を見られないため上限を破れる:
+    //   有効29件 → T1 と T2 が同時に作成（どちらも29件と観測）→ 両方成功 → 31件
+    // 一意制約では表現できない条件なので、DB 側で順番を決めるしかない。
+    // `tg_wellness_reference_guard()` は件数を数える直前に
+    // `pg_advisory_xact_lock(hashtext(owner_id::text))` を取って直列化する。
+    //
+    // PGlite は接続が1本で、2つのトランザクションを本当に並行させられない
+    // （＝ロックの待ち合わせそのものは再現できない）。そこで、直列化の
+    // 前提になる**ロックが実際に取られていること**を実トランザクションの中から
+    // 確かめる。同時実行時に片方が拒否されることは、下の並行 INSERT で見る。
+    const lockUser = await signUp(db, "symptom-lock@example.test");
+    const otherUser = await signUp(db, "symptom-lock-other@example.test");
+
+    await asAuthenticated(db, lockUser, async () => {
+      await db.query("select public.seed_default_symptom_types()");
+      // `archived_at` は INSERT 権限の対象外（migration 20260903000200）。
+      // 作ってから UPDATE でアーカイブする。
+      await db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'lock_archived', 'アーカイブ済み')`,
+        [lockUser],
+      );
+      await db.query(
+        `update public.symptom_types set archived_at = now()
+         where owner_id = $1 and symptom_key = 'lock_archived'`,
+        [lockUser],
+      );
+      await db.query(
+        `insert into public.beverage_types (owner_id, beverage_key, display_name, default_unit)
+         values ($1, 'lock_drink', 'ロック確認用ドリンク', 'ml')`,
+        [lockUser],
+      );
+    });
+
+    /** 所有者IDから導いたキーのアドバイザリロックが、今このセッションで有効か。 */
+    const advisoryLockHeld = async (ownerId: string): Promise<number> => {
+      const { rows } = await db.query<{ held: number }>(
+        `select count(*)::int as held
+           from pg_locks
+          where locktype = 'advisory'
+            and granted
+            and classid = ((pg_catalog.hashtext($1)::bigint >> 32) & 4294967295)::oid
+            and objid = (pg_catalog.hashtext($1)::bigint & 4294967295)::oid`,
+        [ownerId],
+      );
+      return rows[0]?.held ?? 0;
+    };
+
+    /** 明示トランザクションの中で走らせ、必ず巻き戻す（ロックの観測用）。 */
+    const probeInTransaction = async <T>(ownerId: string, run: () => Promise<T>): Promise<T> => {
+      await db.exec("begin;");
+      await db.query("select set_config('request.jwt.claims', $1, true)", [
+        JSON.stringify({ sub: ownerId, role: "authenticated" }),
+      ]);
+      await db.exec("set local role authenticated;");
+      try {
+        return await run();
+      } finally {
+        await db.exec("rollback;");
+      }
+    };
+
+    // 1. 新規作成: 件数を数える前に所有者のロックを取っている。
+    const onInsert = await probeInTransaction(lockUser, async () => {
+      await db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'lock_probe', 'ロック確認')`,
+        [lockUser],
+      );
+      return {
+        owner: await advisoryLockHeld(lockUser),
+        other: await advisoryLockHeld(otherUser),
+      };
+    });
+    expect(onInsert.owner).toBe(1);
+    // 直列化されるのは同じ所有者への同時変更だけ。他の利用者は待たされない。
+    expect(onInsert.other).toBe(0);
+
+    // 2. アーカイブ解除: 有効件数が増えるので、こちらも同じロックを取る。
+    const onRestore = await probeInTransaction(lockUser, async () => {
+      await db.query(
+        `update public.symptom_types set archived_at = null
+         where owner_id = $1 and symptom_key = 'lock_archived'`,
+        [lockUser],
+      );
+      return advisoryLockHeld(lockUser);
+    });
+    expect(onRestore).toBe(1);
+
+    // 3. 有効件数が増えない操作では取らない（不要な直列化をしない）。
+    const onArchivedRename = await probeInTransaction(lockUser, async () => {
+      await db.query(
+        `update public.symptom_types set display_name = 'アーカイブ済み（改名）'
+         where owner_id = $1 and symptom_key = 'lock_archived'`,
+        [lockUser],
+      );
+      return advisoryLockHeld(lockUser);
+    });
+    expect(onArchivedRename).toBe(0);
+
+    const onBeverageInsert = await probeInTransaction(lockUser, async () => {
+      await db.query(
+        `insert into public.beverage_types (owner_id, beverage_key, display_name, default_unit)
+         values ($1, 'lock_drink_2', 'ロック確認用ドリンク2', 'ml')`,
+        [lockUser],
+      );
+      return advisoryLockHeld(lockUser);
+    });
+    expect(onBeverageInsert).toBe(0);
+
+    // 4. トランザクション単位のロックなので、終了時に自動で解放される
+    //    （明示的な解放処理は要らない）。
+    expect(await advisoryLockHeld(lockUser)).toBe(0);
+
+    // 5. 有効29件から2件を同時に投げると、片方だけが通って30件で止まる。
+    const raceUser = await signUp(db, "symptom-race@example.test");
+    await asAuthenticated(db, raceUser, async () => {
+      await db.query("select public.seed_default_symptom_types()");
+      for (let index = 0; index < 29; index += 1) {
+        await db.query(
+          `insert into public.symptom_types (owner_id, symptom_key, display_name)
+           values ($1, $2, $3)`,
+          [raceUser, `race_${index}`, `競合${index}`],
+        );
+      }
+    });
+
+    await db.query("select set_config('request.jwt.claims', $1, false)", [
+      JSON.stringify({ sub: raceUser, role: "authenticated" }),
+    ]);
+    await db.exec("set role authenticated;");
+    const raced = await Promise.allSettled([
+      db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'race_a', '同時A')`,
+        [raceUser],
+      ),
+      db.query(
+        `insert into public.symptom_types (owner_id, symptom_key, display_name)
+         values ($1, 'race_b', '同時B')`,
+        [raceUser],
+      ),
+    ]);
+    await db.exec("reset role;");
+    await db.query("select set_config('request.jwt.claims', '', false)");
+
+    expect(raced.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const refused = raced.find((result) => result.status === "rejected");
+    expect(String(refused?.reason)).toContain("limited to 30 per owner");
+
+    const { rows } = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.symptom_types
+       where owner_id = $1 and not is_default and archived_at is null`,
+      [raceUser],
+    );
+    expect(rows[0]?.count).toBe("30");
+
+    // どのトランザクションもコミット済み。ロックは残っていない。
+    expect(await advisoryLockHeld(raceUser)).toBe(0);
+  });
+
   it("カスタム症状種別は30件まで", async () => {
     const capUser = await signUp(db, "symptom-cap@example.test");
     await asAuthenticated(db, capUser, async () => {
