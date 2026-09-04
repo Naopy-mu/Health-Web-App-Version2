@@ -39,7 +39,11 @@ const columnList = (columns: string | undefined): string =>
         .map((column) => identifier(column.trim()))
         .join(", ");
 
-type Filter = { readonly column: string; readonly op: "eq" | "gte" | "lte" | "is"; value: unknown };
+type Filter = {
+  readonly column: string;
+  readonly op: "eq" | "gte" | "lte" | "is" | "in";
+  value: unknown;
+};
 
 type PostgresLikeError = {
   code?: string;
@@ -59,12 +63,34 @@ const toPostgrestError = (cause: unknown) => {
   };
 };
 
-export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClient {
-  const run = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> =>
-    asAuthenticated(db, userId, async () => {
+/**
+ * 同時実行の再現用フック。
+ *
+ * PGlite は接続が1本なので、2つのリクエストを本当に並行させることはできない。
+ * その代わり「片方が SQL を1本投げ終えた**直後**に、もう片方を最後まで進める」
+ * という割り込み点をテストから差し込めるようにする。リポジトリの手順のどの
+ * 隙間で競合が起きるかを、待ち合わせで決め打ちできる。
+ *
+ * `afterQuery` は接続が空いた状態（`asAuthenticated` の外）で呼ばれるので、
+ * 中から別のクライアントで自由に問い合わせてよい。
+ */
+export type PglitePostgrestHooks = {
+  readonly afterQuery?: (sql: string) => Promise<void>;
+};
+
+export function createPglitePostgrest(
+  db: PGlite,
+  userId: string,
+  hooks: PglitePostgrestHooks = {},
+): SupabaseClient {
+  const run = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> => {
+    const rows = await asAuthenticated(db, userId, async () => {
       const result = await db.query<Record<string, unknown>>(sql, params);
       return result.rows;
     });
+    await hooks.afterQuery?.(sql);
+    return rows;
+  };
 
   const createBuilder = (
     table: string,
@@ -91,6 +117,10 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
               throw new Error("only `is(column, null)` is supported");
             }
             return `${column} is null`;
+          }
+          if (filter.op === "in") {
+            // PostgREST の `.in()`。空配列でも成立するよう `= any(...)` で書く。
+            return `${column} = any(${placeholder(filter.value)})`;
           }
           const operator = filter.op === "eq" ? "=" : filter.op === "gte" ? ">=" : "<=";
           return `${column} ${operator} ${placeholder(filter.value)}`;
@@ -182,6 +212,7 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
       gte: addFilter("gte"),
       lte: addFilter("lte"),
       is: addFilter("is"),
+      in: addFilter("in"),
       or() {
         throw new Error("or() is not supported by the PGlite-backed client");
       },
@@ -209,9 +240,17 @@ export function createPglitePostgrest(db: PGlite, userId: string): SupabaseClien
     auth: {
       getUser: async () => ({ data: { user: { id: userId } }, error: null }),
     },
-    rpc: async (name: string) => {
+    rpc: async (name: string, args?: Record<string, unknown>) => {
       try {
-        const rows = await run(`select * from public.${identifier(name)}()`, []);
+        // 名前付き引数（`f(p_a => $1, ...)`）で呼ぶ。PostgREST と同じ渡し方。
+        const entries = Object.entries(args ?? {});
+        const params = entries.map(([, value]) =>
+          value !== null && typeof value === "object" ? JSON.stringify(value) : value,
+        );
+        const argumentList = entries
+          .map(([key], index) => `${identifier(key)} => $${index + 1}`)
+          .join(", ");
+        const rows = await run(`select * from public.${identifier(name)}(${argumentList})`, params);
         // スカラーを返す関数（`is_active_user()` など）は1列1行になる。
         const first = rows[0];
         if (rows.length === 1 && first !== undefined && Object.keys(first).length === 1) {

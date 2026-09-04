@@ -16,6 +16,11 @@ Phase 1「DBスキーマ基盤」で用意した共通ルールをまとめる�
 | `supabase/migrations/20260827000600_body_measurements_rls.sql`         | 身体測定の RLS（6.5節・9章）                                                                             |
 | `supabase/migrations/20260827000700_body_measurement_seed.sql`         | `seed_default_body_measurement_types()` RPC（5.3節）                                                     |
 | `supabase/migrations/20260827000800_body_measurement_mutation_log.sql` | 冪等キーの適用結果の履歴（5.3節・6.4節）。**追記専用テーブルの例**（本テンプレートの対象外）             |
+| `supabase/migrations/20260903000100_wellness_core.sql`                 | 睡眠・水分・体調の8テーブル（5.5節）。**409 後の対象特定を一意制約で担保した例**                         |
+| `supabase/migrations/20260903000200_wellness_rls.sql`                  | 睡眠・水分・体調の RLS（6.5節・9章）                                                                     |
+| `supabase/migrations/20260903000300_wellness_seed.sql`                 | 既定カタログの seed RPC と症状リンクの全置換 RPC（5.5節）                                                |
+| `supabase/migrations/20260903000400_wellness_mutation_log.sql`         | 睡眠・水分・体調の冪等キー履歴（5.5節・6.4節）。追記専用                                                 |
+| `supabase/migrations/20260903000500_wellness_condition_save.sql`       | 体調記録の本体と症状リンクを1トランザクションで保存する `save_condition_entry()`（5.5節・6.4節）         |
 
 migration のファイル名は `YYYYMMDDHHMMSS_<snake_case>.sql`。番号は既存の最大値より必ず大きくする。
 
@@ -138,6 +143,11 @@ select public.apply_owned_mutable_table_conventions('public.workout_routine_item
 `src/server/body-measurements/repository.ts` と `docs/api/measurements.md` が
 後続フェーズの参照実装になる。
 
+Phase 4-1a の睡眠・水分・体調（`supabase/migrations/20260903000100_wellness_core.sql`）は
+同じテンプレートを8テーブルへ広げた例で、`condition_entry_symptoms` は
+**親（`condition_entries`）と参照先（`symptom_types`）の両方へ複合外部キーを張る**
+形になっている。
+
 ---
 
 ## 3. 楽観ロックと冪等性（6.4節）
@@ -226,8 +236,27 @@ cmid=A で再送 → 行に A が無い → 期待版番号 2 で UPDATE → 0�
 スナップショットで、現在の行ではない（再送は「失われた応答の再受信」であり、
 その後に別のミューテーションが進めた版番号を返してはならない）。
 
-後続フェーズで同じ仕組みを全エンティティへ広げるときは、実装仕様書 8.1節の
+Phase 4-1a は `public.wellness_mutation_log`（migration 20260903000400）で同じ仕組みを
+睡眠・水分・体調へ広げた。**新しい機能領域を足すときは、領域ごとに1つの追記専用ログを
+用意し、`resource` 列で対象テーブルを区別する**（冪等キーの一意性は
+`(owner_id, resource, client_mutation_id)` で閉じる）。
+最終的に全エンティティを横断するときは、実装仕様書 8.1節の
 `offline_sync_operation_results` がその一般形になる。
+
+### 3.4 409 のあとに対象行へ戻れる設計にする
+
+Phase 3b（身体測定フロントエンド）では、409 を受けたあとに「`limit` 付きの一覧を
+取り直すだけ」では対象行を見失う不具合が繰り返し見つかった。一覧の何ページ目に
+対象があるか分からないため、最新の `row_version` を取得できない。
+
+**新しい機能テーブルを設計するときは、「所有者 + 記録日時（+ 種別）」のように
+対象を1件へ絞り込める一意制約を最初から置く**こと。API の GET はその組み合わせを
+そのまま絞り込み条件として公開し、フロントは 409 のあとにその条件で引き直す。
+一意制約は同時に「同一の所有者・種別・日時の重複登録」を防ぐ制約にもなる
+（実装仕様書 5.3節）。
+
+実例は `supabase/migrations/20260903000100_wellness_core.sql` の冒頭の表と
+`docs/api/wellness.md` 1.7節。
 
 ---
 

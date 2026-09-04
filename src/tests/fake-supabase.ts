@@ -18,7 +18,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type FakeFilter = {
-  readonly op: "eq" | "gte" | "lte" | "is";
+  readonly op: "eq" | "gte" | "lte" | "is" | "in";
   readonly column: string;
   readonly value: unknown;
 };
@@ -66,11 +66,14 @@ export type FakeSupabase = {
   readonly operations: FakeOperation[];
   /** 呼ばれた RPC 名。 */
   readonly rpcCalls: string[];
+  /** 引数付きで呼ばれた RPC（症状リンクの全置換などの検証に使う）。 */
+  readonly rpcArgs: { name: string; args: Record<string, unknown> }[];
 };
 
 export function createFakeSupabase(options: FakeSupabaseOptions = {}): FakeSupabase {
   const operations: FakeOperation[] = [];
   const rpcCalls: string[] = [];
+  const rpcArgs: { name: string; args: Record<string, unknown> }[] = [];
   const queues = new Map<string, FakeResult[]>(
     Object.entries(options.responses ?? {}).map(([key, results]) => [key, [...results]]),
   );
@@ -118,6 +121,7 @@ export function createFakeSupabase(options: FakeSupabaseOptions = {}): FakeSupab
       gte: addFilter("gte"),
       lte: addFilter("lte"),
       is: addFilter("is"),
+      in: addFilter("in"),
       or(expression: string) {
         operation.or = expression;
         return builder;
@@ -152,8 +156,11 @@ export function createFakeSupabase(options: FakeSupabaseOptions = {}): FakeSupab
         error: null,
       }),
     },
-    rpc: async (name: string) => {
+    rpc: async (name: string, args?: Record<string, unknown>) => {
       rpcCalls.push(name);
+      if (args !== undefined) {
+        rpcArgs.push({ name, args });
+      }
       if (name === "is_active_user") {
         return { data: options.isActiveUser ?? true, error: null };
       }
@@ -167,7 +174,7 @@ export function createFakeSupabase(options: FakeSupabaseOptions = {}): FakeSupab
     }),
   };
 
-  return { client: client as unknown as SupabaseClient, operations, rpcCalls };
+  return { client: client as unknown as SupabaseClient, operations, rpcCalls, rpcArgs };
 }
 
 /** テストで使い回す固定の所有者ID（`auth.users.id` = `owner_id`）。 */

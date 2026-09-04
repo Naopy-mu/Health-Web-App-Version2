@@ -36,22 +36,34 @@ describe("supabase/migrations (実装仕様書 6章 / 12章)", () => {
     );
 
     expect(rows.map((row) => row.table_name)).toStrictEqual([
+      // Phase 4-1a: 睡眠・水分・体調（実装仕様書 5.5節）
+      "beverage_types",
+      // Phase 3a: 身体測定（実装仕様書 5.3節）
       "body_measurement_goals",
       "body_measurement_mutation_log",
       "body_measurement_types",
       "body_measurements",
+      "condition_entries",
+      "condition_entry_symptoms",
+      "hydration_entries",
+      "hydration_goals",
+      "sleep_entries",
+      "sleep_goals",
+      "symptom_types",
+      // Phase 1: ID・プロフィール（実装仕様書 6.1節）
       "user_profiles",
       "users",
+      "wellness_mutation_log",
     ]);
   });
 
   it("未着手のフェーズの機能テーブルはまだ作らない", async () => {
-    // Phase 3a で追加したのは身体測定（実装仕様書 5.3節）の3テーブルと、
-    // その冪等キーの適用結果ログ（6.4節）だけ。
+    // Phase 3a は身体測定（実装仕様書 5.3節）、Phase 4-1a は睡眠・水分・体調
+    // （5.5節）まで。運動・食事・習慣などは後続フェーズ。
     const { rows } = await db.query<{ count: string }>(
       `select count(*)::text as count from information_schema.tables
        where table_schema = 'public'
-         and table_name in ('workout_sessions', 'meal_recipes', 'habits', 'sleep_entries')`,
+         and table_name in ('workout_sessions', 'meal_recipes', 'habits', 'supplement_products')`,
     );
 
     expect(rows[0]?.count).toBe("0");

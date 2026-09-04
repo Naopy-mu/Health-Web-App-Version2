@@ -4,6 +4,34 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { asAuthenticated, createMigratedDatabase, expectRejection, signUp } from "./pglite";
 
+/**
+ * 共通テンプレート（docs/database/table-conventions.md 1節）を適用した
+ * 所有者スコープの可変公開テーブル。フェーズごとに増えるので、ここが
+ * 「どのフェーズまでのテーブルが入っているか」の目録になる。
+ * 並びは PostgreSQL の `order by table_name`（C ロケール）と揃える。
+ */
+const OWNED_MUTABLE_TABLES = [
+  // Phase 4-1a: 睡眠・水分・体調（実装仕様書 5.5節）
+  "beverage_types",
+  // Phase 3a: 身体測定（実装仕様書 5.3節）
+  "body_measurement_goals",
+  "body_measurement_types",
+  "body_measurements",
+  "condition_entries",
+  "condition_entry_symptoms",
+  "hydration_entries",
+  "hydration_goals",
+  "sleep_entries",
+  "sleep_goals",
+  "symptom_types",
+  // Phase 1: ID・プロフィール（実装仕様書 6.1節）
+  "user_profiles",
+  "users",
+] as const;
+
+/** 追記専用（row_version も楽観ロックも持たない）テーブル。 */
+const APPEND_ONLY_TABLES = ["body_measurement_mutation_log", "wellness_mutation_log"] as const;
+
 describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", () => {
   let db: PGlite;
   let userId: string;
@@ -25,39 +53,26 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
        order by table_name, column_name`,
     );
 
-    expect(rows).toStrictEqual([
-      {
-        table_name: "body_measurement_goals",
-        column_name: "client_mutation_id",
-        data_type: "uuid",
-      },
-      { table_name: "body_measurement_goals", column_name: "owner_id", data_type: "uuid" },
-      { table_name: "body_measurement_goals", column_name: "row_version", data_type: "bigint" },
-      // 冪等キーの適用結果の履歴（migration 20260827000800）。追記専用テーブルなので
-      // row_version は持たない（本パターンの対象外。docs/database/table-conventions.md）。
-      {
-        table_name: "body_measurement_mutation_log",
-        column_name: "client_mutation_id",
-        data_type: "uuid",
-      },
-      { table_name: "body_measurement_mutation_log", column_name: "owner_id", data_type: "uuid" },
-      {
-        table_name: "body_measurement_types",
-        column_name: "client_mutation_id",
-        data_type: "uuid",
-      },
-      { table_name: "body_measurement_types", column_name: "owner_id", data_type: "uuid" },
-      { table_name: "body_measurement_types", column_name: "row_version", data_type: "bigint" },
-      { table_name: "body_measurements", column_name: "client_mutation_id", data_type: "uuid" },
-      { table_name: "body_measurements", column_name: "owner_id", data_type: "uuid" },
-      { table_name: "body_measurements", column_name: "row_version", data_type: "bigint" },
-      { table_name: "user_profiles", column_name: "client_mutation_id", data_type: "uuid" },
-      { table_name: "user_profiles", column_name: "owner_id", data_type: "uuid" },
-      { table_name: "user_profiles", column_name: "row_version", data_type: "bigint" },
-      { table_name: "users", column_name: "client_mutation_id", data_type: "uuid" },
-      { table_name: "users", column_name: "owner_id", data_type: "uuid" },
-      { table_name: "users", column_name: "row_version", data_type: "bigint" },
-    ]);
+    // 追記専用テーブル（冪等キーの適用結果の履歴）は row_version を持たない。
+    // docs/database/table-conventions.md「`audit_logs` のような追記専用テーブルは
+    // 本パターンの対象外」。
+    const expected = [
+      ...OWNED_MUTABLE_TABLES.flatMap((table_name) => [
+        { table_name, column_name: "client_mutation_id", data_type: "uuid" },
+        { table_name, column_name: "owner_id", data_type: "uuid" },
+        { table_name, column_name: "row_version", data_type: "bigint" },
+      ]),
+      ...APPEND_ONLY_TABLES.flatMap((table_name) => [
+        { table_name, column_name: "client_mutation_id", data_type: "uuid" },
+        { table_name, column_name: "owner_id", data_type: "uuid" },
+      ]),
+    ].sort(
+      (a, b) =>
+        a.table_name.localeCompare(b.table_name, "en") ||
+        a.column_name.localeCompare(b.column_name, "en"),
+    );
+
+    expect(rows).toStrictEqual(expected);
   });
 
   it("(owner_id, client_mutation_id) の NULL 除外一意インデックスが張られている", async () => {
@@ -67,13 +82,7 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
        order by tablename`,
     );
 
-    expect(rows.map((row) => row.tablename)).toStrictEqual([
-      "body_measurement_goals",
-      "body_measurement_types",
-      "body_measurements",
-      "user_profiles",
-      "users",
-    ]);
+    expect(rows.map((row) => row.tablename)).toStrictEqual([...OWNED_MUTABLE_TABLES]);
     for (const row of rows) {
       expect(row.indexdef).toContain("CREATE UNIQUE INDEX");
       expect(row.indexdef).toContain("(owner_id, client_mutation_id)");
