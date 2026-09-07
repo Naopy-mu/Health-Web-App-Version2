@@ -1,22 +1,21 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { HydrationGoal, HydrationGoalInput, SleepGoal, SleepGoalInput } from "../schema";
 import { WEEKDAYS, WEEKDAY_LABELS } from "../units";
 import { toDateInputValue } from "../utils";
-import type { ConflictInfo } from "../use-wellness";
-import { ConflictBanner } from "./conflict-banner";
 import styles from "../wellness.module.css";
 
 type GoalManagerProps = {
   resource: "sleep" | "hydration";
   goals: (SleepGoal | HydrationGoal)[];
+  editingGoal: SleepGoal | HydrationGoal | null;
+  onSetEditingGoal: (goal: SleepGoal | HydrationGoal | null) => void;
   onSave: (goal: SleepGoalInput | HydrationGoalInput) => Promise<boolean> | boolean;
   onDelete: (goal: SleepGoal | HydrationGoal) => Promise<boolean> | boolean;
   disabled: boolean;
   serverError: string | null;
-  conflict?: ConflictInfo | null;
 };
 
 type GoalFormData = {
@@ -72,13 +71,13 @@ function hydrationGoalToForm(goal: HydrationGoal): GoalFormData {
 export function GoalManager({
   resource,
   goals,
+  editingGoal,
+  onSetEditingGoal,
   onSave,
   onDelete,
   disabled,
   serverError,
-  conflict,
 }: GoalManagerProps) {
-  const [editingGoal, setEditingGoal] = useState<SleepGoal | HydrationGoal | null>(null);
   const [form, setForm] = useState<GoalFormData>(emptyForm());
   const [errors, setErrors] = useState<Partial<Record<keyof GoalFormData, string>>>({});
 
@@ -91,8 +90,18 @@ export function GoalManager({
 
   const isSleep = resource === "sleep";
 
+  const previousEditingId = useRef<string | null>(null);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    const editingId = editingGoal?.id ?? null;
+    // rowVersion / updatedAt のみが変わった場合（409後の最新化）は
+    // 入力中の内容を保持し、フォームをリセットしない。
+    if (editingId === previousEditingId.current) {
+      return;
+    }
+    previousEditingId.current = editingId;
+
     if (editingGoal) {
       setForm(
         isSleep
@@ -181,7 +190,7 @@ export function GoalManager({
       ...payload,
     });
     if (ok) {
-      setEditingGoal(null);
+      onSetEditingGoal(null);
       setForm(emptyForm());
     }
   };
@@ -197,7 +206,6 @@ export function GoalManager({
             {serverError}
           </p>
         ) : null}
-        {conflict ? <ConflictBanner conflict={conflict} /> : null}
         {goals.length === 0 ? (
           <p className={styles.empty}>目標が登録されていません。</p>
         ) : (
@@ -242,7 +250,7 @@ export function GoalManager({
                         <button
                           className={`${styles.button} ${styles.buttonSecondary}`}
                           type="button"
-                          onClick={() => setEditingGoal(goal)}
+                          onClick={() => onSetEditingGoal(goal)}
                           disabled={disabled}
                         >
                           編集
@@ -432,7 +440,7 @@ export function GoalManager({
               <button
                 className={`${styles.button} ${styles.buttonSecondary}`}
                 type="button"
-                onClick={() => setEditingGoal(null)}
+                onClick={() => onSetEditingGoal(null)}
                 disabled={disabled}
               >
                 キャンセル

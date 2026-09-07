@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ConditionEntry, SymptomType } from "../schema";
 import { useWellness } from "../use-wellness";
 import { listWellness } from "../api";
-import { buildConditionCsv, downloadCsv, generateUuid } from "../utils";
+import { buildConditionCsv, downloadCsv, generateUuid, meanBy } from "../utils";
 import { ConditionForm } from "./condition-form";
 import { ConditionList } from "./condition-list";
 import { TypeManager } from "./type-manager";
@@ -25,6 +25,7 @@ export function ConditionPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
   const conflictRef = useRef<HTMLDivElement>(null);
+  const clientMutationIdRef = useRef<string | null>(null);
 
   const {
     entries,
@@ -48,6 +49,17 @@ export function ConditionPage() {
     }
   }, [conflict]);
 
+  const getClientMutationId = useCallback(() => {
+    if (!clientMutationIdRef.current) {
+      clientMutationIdRef.current = generateUuid();
+    }
+    return clientMutationIdRef.current;
+  }, []);
+
+  const clearClientMutationId = useCallback(() => {
+    clientMutationIdRef.current = null;
+  }, []);
+
   const handleSave = useCallback(
     async (input: {
       id?: string;
@@ -68,16 +80,17 @@ export function ConditionPage() {
       setFormError(null);
       const request = {
         resource: "condition" as const,
-        clientMutationId: generateUuid(),
+        clientMutationId: getClientMutationId(),
         entry: input,
       };
       const ok = await saveEntry(request, { editingEntry, setEditingEntry });
       if (ok) {
         setEditingEntry(null);
+        clearClientMutationId();
       }
       return ok;
     },
-    [saveEntry, editingEntry],
+    [saveEntry, editingEntry, getClientMutationId, clearClientMutationId],
   );
 
   const handleDelete = useCallback(
@@ -139,6 +152,34 @@ export function ConditionPage() {
     [saveType],
   );
 
+  const handleTabKeyDown = useCallback((event: React.KeyboardEvent, index: number) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const nextIndex =
+      event.key === "ArrowLeft"
+        ? (index - 1 + TABS.length) % TABS.length
+        : (index + 1) % TABS.length;
+    setActiveTab(TABS[nextIndex].key);
+    requestAnimationFrame(() => {
+      const tab = document.getElementById(`condition-tab-${TABS[nextIndex].key}`);
+      tab?.focus();
+    });
+  }, []);
+
+  const averages = useMemo(() => {
+    return {
+      overall: meanBy(entries, (entry) => entry.overallScore),
+      fatigue: meanBy(entries, (entry) => entry.fatigueScore),
+      energy: meanBy(entries, (entry) => entry.energyScore),
+      stress: meanBy(entries, (entry) => entry.stressScore),
+      pain: meanBy(entries, (entry) => entry.painScore),
+      mood: meanBy(entries, (entry) => entry.moodScore),
+      temperature: meanBy(entries, (entry) => entry.bodyTemperatureC),
+    };
+  }, [entries]);
+
   const isLoading = loadingState !== "idle";
   const isSubmitting = loadingState === "submitting";
 
@@ -161,15 +202,17 @@ export function ConditionPage() {
         ) : null}
 
         <div className={styles.tabs} role="tablist" aria-label="体調タブ">
-          {TABS.map((tab) => (
+          {TABS.map((tab, index) => (
             <button
               key={tab.key}
+              id={`condition-tab-${tab.key}`}
               className={styles.tab}
               role="tab"
               aria-selected={activeTab === tab.key}
               aria-controls={`condition-panel-${tab.key}`}
               tabIndex={activeTab === tab.key ? 0 : -1}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
               type="button"
             >
               {tab.label}
@@ -184,7 +227,18 @@ export function ConditionPage() {
                 {formError}
               </p>
             ) : null}
-            {conflict ? <ConflictBanner ref={conflictRef} conflict={conflict} /> : null}
+            {conflict ? (
+              <div>
+                <ConflictBanner ref={conflictRef} conflict={conflict} />
+                {conflict.target?.kind === "entry" ? (
+                  <p className={`${styles.status} ${styles.statusInfo}`} role="status">
+                    サーバーの最新値: 総合スコア{" "}
+                    {(conflict.target.data as ConditionEntry).overallScore ?? "—"} @{" "}
+                    {new Date((conflict.target.data as ConditionEntry).recordedAt).toLocaleString()}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             <button
               className={`${styles.button} ${styles.buttonSecondary}`}
@@ -195,11 +249,27 @@ export function ConditionPage() {
               {csvLoading ? "出力中…" : "CSV出力"}
             </button>
 
+            {entries.length > 0 ? (
+              <p className={`${styles.status} ${styles.statusInfo}`} role="status">
+                平均: 総合{averages.overall?.toFixed(1) ?? "—"} / 疲労
+                {averages.fatigue?.toFixed(1) ?? "—"} / 活力
+                {averages.energy?.toFixed(1) ?? "—"} / ストレス
+                {averages.stress?.toFixed(1) ?? "—"} / 痛み
+                {averages.pain?.toFixed(1) ?? "—"} / 気分
+                {averages.mood?.toFixed(1) ?? "—"}
+                {averages.temperature !== null ? ` / 体温${averages.temperature.toFixed(1)}℃` : ""}
+                <span className={styles.statusSecondary}>（{entries.length}件）</span>
+              </p>
+            ) : null}
+
             <ConditionForm
               symptomTypes={activeSymptomTypes as SymptomType[]}
               editingEntry={editingEntry}
               onSubmit={handleSave}
-              onCancel={() => setEditingEntry(null)}
+              onCancel={() => {
+                setEditingEntry(null);
+                clearClientMutationId();
+              }}
               disabled={isSubmitting}
               serverError={error}
             />
@@ -232,6 +302,7 @@ export function ConditionPage() {
 
         {activeTab === "types" ? (
           <div id="condition-panel-types" role="tabpanel" aria-labelledby="condition-tab-types">
+            {conflict ? <ConflictBanner ref={conflictRef} conflict={conflict} /> : null}
             <TypeManager
               resource="condition"
               activeTypes={activeSymptomTypes}
@@ -240,7 +311,6 @@ export function ConditionPage() {
               onArchiveToggle={toggleArchiveType}
               disabled={isSubmitting}
               serverError={error}
-              conflict={conflict}
             />
           </div>
         ) : null}

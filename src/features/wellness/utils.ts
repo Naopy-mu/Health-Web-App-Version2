@@ -24,6 +24,7 @@ import {
   type HydrationUnit,
   type SleepKind,
 } from "./units";
+import { IANA_TIMEZONE_PATTERN } from "./schema";
 
 export function generateUuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -57,6 +58,38 @@ export function parseDateTimeLocal(value: string): Date {
   return new Date(value);
 }
 
+/**
+ * `<input type="datetime-local">` の値をブラウザのローカルタイムゾーンではなく、
+ * 指定した IANA タイムゾーンの同じ日時として解釈し直す（S10）。
+ *
+ * 例: ブラウザが UTC、timezone=Asia/Tokyo、value=2026-09-07T10:00 のとき、
+ * ブラウザは 2026-09-07T10:00Z と解釈するが、返す Date は 2026-09-07T01:00Z
+ * （= Tokyo の 2026-09-07T10:00）となる。
+ */
+export function convertDateTimeLocalToTimezone(value: string, timezone: string): Date {
+  const localDate = new Date(`${value}:00`);
+  if (Number.isNaN(localDate.getTime()) || !isValidTimezone(timezone)) {
+    return localDate;
+  }
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(localDate);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  const tzString = `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
+  const tzDate = new Date(tzString);
+  const offset = tzDate.getTime() - localDate.getTime();
+  return new Date(localDate.getTime() - offset);
+}
+
 export function sleepKindLabel(kind: SleepKind): string {
   return SLEEP_KIND_LABELS[kind];
 }
@@ -77,6 +110,13 @@ export function formatSleepEntrySummary(entry: SleepEntry): string {
     calculateSleepMinutes(entry.sleepAt, entry.wakeAt, entry.awakeMinutes) ?? entry.sleepMinutes;
   const efficiency = calculateSleepEfficiency(sleep, inBed);
   return `${sleepKindLabel(entry.sleepKind)} / 睡眠 ${formatMinutes(sleep)} / 効率 ${efficiency !== null ? `${efficiency}%` : "—"}`;
+}
+
+export function formatSleepEfficiency(efficiency: number | null): string {
+  if (efficiency === null) {
+    return "—";
+  }
+  return `${efficiency}%（推定値）`;
 }
 
 export function formatHydrationAmount(amount: number, unit: HydrationUnit): string {
@@ -267,4 +307,37 @@ export function formatDateJa(iso: string): string {
 
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+/**
+ * 数値フィールドの平均を計算する。`null` は無視する。
+ * 有効な値が1件もなければ `null` を返す（S6）。
+ */
+export function meanBy<T>(items: T[], selector: (item: T) => number | null): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const item of items) {
+    const value = selector(item);
+    if (value !== null && Number.isFinite(value)) {
+      sum += value;
+      count += 1;
+    }
+  }
+  return count > 0 ? sum / count : null;
+}
+
+/** IANA タイムゾーン名として有効か検証する（S10）。 */
+export function isValidTimezone(timezone: string): boolean {
+  if (!timezone) {
+    return false;
+  }
+  if (!IANA_TIMEZONE_PATTERN.test(timezone)) {
+    return false;
+  }
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -37,12 +37,12 @@ export function ConditionList({ entries, onEdit, onDelete, disabled }: Condition
           {entries.map((entry) => (
             <tr key={entry.id}>
               <td>{formatDateTimeJa(entry.recordedAt)}</td>
-              <td>{entry.overallScore ?? "—"}</td>
-              <td>{entry.fatigueScore ?? "—"}</td>
-              <td>{entry.energyScore ?? "—"}</td>
-              <td>{entry.stressScore ?? "—"}</td>
-              <td>{entry.painScore ?? "—"}</td>
-              <td>{entry.moodScore ?? "—"}</td>
+              <td data-score-type="overall">{entry.overallScore ?? "—"}</td>
+              <td data-score-type="fatigue">{entry.fatigueScore ?? "—"}</td>
+              <td data-score-type="energy">{entry.energyScore ?? "—"}</td>
+              <td data-score-type="stress">{entry.stressScore ?? "—"}</td>
+              <td data-score-type="pain">{entry.painScore ?? "—"}</td>
+              <td data-score-type="mood">{entry.moodScore ?? "—"}</td>
               <td>{entry.bodyTemperatureC !== null ? `${entry.bodyTemperatureC}℃` : "—"}</td>
               <td>
                 {entry.symptoms.length === 0 && entry.freeTextSymptoms.length === 0

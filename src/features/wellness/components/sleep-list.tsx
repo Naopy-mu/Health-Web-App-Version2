@@ -6,7 +6,7 @@ import {
   calculateSleepMinutes,
   calculateTimeInBedMinutes,
 } from "../units";
-import { formatDateTimeJa, formatMinutes, sleepKindLabel } from "../utils";
+import { formatDateTimeJa, formatMinutes, formatSleepEfficiency, sleepKindLabel } from "../utils";
 import styles from "../wellness.module.css";
 
 type SleepListProps = {
@@ -49,7 +49,7 @@ export function SleepList({ entries, onEdit, onDelete, disabled }: SleepListProp
                 <td>{sleepKindLabel(entry.sleepKind)}</td>
                 <td>{formatMinutes(sleepMinutes)}</td>
                 <td>{formatMinutes(timeInBed)}</td>
-                <td>{efficiency !== null ? `${efficiency}%` : "—"}</td>
+                <td>{formatSleepEfficiency(efficiency)}</td>
                 <td>
                   {entry.quality ?? "—"} / {entry.morningFeeling ?? "—"}
                 </td>

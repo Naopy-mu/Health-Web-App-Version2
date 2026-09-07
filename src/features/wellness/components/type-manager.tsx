@@ -6,8 +6,6 @@ import type { BeverageType, SymptomType } from "../schema";
 import { CUSTOM_SYMPTOM_TYPE_MAX, isDefaultBeverageKey, isDefaultSymptomKey } from "../defaults";
 import { HYDRATION_UNITS, type HydrationUnit } from "../units";
 import { activeCustomSymptomCount } from "../utils";
-import type { ConflictInfo } from "../use-wellness";
-import { ConflictBanner } from "./conflict-banner";
 import styles from "../wellness.module.css";
 
 type TypeManagerProps = {
@@ -29,7 +27,6 @@ type TypeManagerProps = {
   ) => Promise<boolean> | boolean;
   disabled: boolean;
   serverError: string | null;
-  conflict?: ConflictInfo | null;
 };
 
 const TYPE_KEY_PATTERN = /^[a-z][a-z0-9_]{1,49}$/;
@@ -42,7 +39,6 @@ export function TypeManager({
   onArchiveToggle,
   disabled,
   serverError,
-  conflict,
 }: TypeManagerProps) {
   const [key, setKey] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -124,6 +120,14 @@ export function TypeManager({
 
   const title = isBeverage ? "飲み物種別" : "症状種別";
 
+  const limitBanner = !isBeverage && atLimit && (
+    <p className={styles.limitBanner} role="alert">
+      カスタム症状種別は{CUSTOM_SYMPTOM_TYPE_MAX}
+      件までです。新しく追加する場合も、アーカイブ済みを解除する場合も、
+      上限を超えないよう既存のカスタム症状をアーカイブしてください。
+    </p>
+  );
+
   return (
     <div>
       <section className={styles.card} aria-labelledby="active-types-heading">
@@ -135,13 +139,7 @@ export function TypeManager({
             {serverError}
           </p>
         ) : null}
-        {conflict ? <ConflictBanner conflict={conflict} /> : null}
-        {!isBeverage && atLimit ? (
-          <p className={styles.limitBanner} role="alert">
-            カスタム症状種別は{CUSTOM_SYMPTOM_TYPE_MAX}
-            件までです。新しく追加するには既存のカスタム症状をアーカイブしてください。
-          </p>
-        ) : null}
+        {limitBanner}
         <div className={styles.tableWrapper}>
           <table className={styles.table}>
             <thead>
@@ -187,6 +185,7 @@ export function TypeManager({
           <h2 className={styles.sectionTitle} id="archived-types-heading">
             アーカイブ済み{title}
           </h2>
+          {limitBanner}
           <div className={styles.tableWrapper}>
             <table className={styles.table}>
               <thead>

@@ -96,4 +96,27 @@ describe("ConditionForm", () => {
 
     await waitFor(() => expect(screen.getByText("競合しました")).toBeInTheDocument());
   });
+
+  it("カンマを含む自由記述症状を1件として追加する（S8）", async () => {
+    const onSubmit = vi.fn();
+    render(
+      <ConditionForm
+        symptomTypes={[FEVER_TYPE]}
+        editingEntry={null}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        disabled={false}
+        serverError={null}
+      />,
+    );
+
+    const input = screen.getByLabelText("自由記述症状（Enterで追加、10件まで）");
+    fireEvent.change(input, { target: { value: "のどの痛み, 鼻水" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const submitted = onSubmit.mock.calls[0][0] as ConditionEntry;
+    expect(submitted.freeTextSymptoms).toEqual(["のどの痛み, 鼻水"]);
+  });
 });

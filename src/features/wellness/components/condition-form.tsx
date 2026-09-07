@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import type { ConditionEntry, SymptomType } from "../schema";
-import { parseDateTimeLocal, toDateTimeLocalValue } from "../utils";
+import { convertDateTimeLocalToTimezone, isValidTimezone, toDateTimeLocalValue } from "../utils";
 import styles from "../wellness.module.css";
 
 type ConditionFormData = {
@@ -16,7 +16,7 @@ type ConditionFormData = {
   painScore: string;
   moodScore: string;
   bodyTemperatureC: string;
-  freeTextSymptoms: string;
+  freeTextSymptoms: string[];
   note: string;
 };
 
@@ -40,7 +40,7 @@ function emptyForm(): ConditionFormData {
     painScore: "",
     moodScore: "",
     bodyTemperatureC: "",
-    freeTextSymptoms: "",
+    freeTextSymptoms: [],
     note: "",
   };
 }
@@ -56,7 +56,7 @@ function entryToForm(entry: ConditionEntry): ConditionFormData {
     painScore: entry.painScore !== null ? String(entry.painScore) : "",
     moodScore: entry.moodScore !== null ? String(entry.moodScore) : "",
     bodyTemperatureC: entry.bodyTemperatureC !== null ? String(entry.bodyTemperatureC) : "",
-    freeTextSymptoms: entry.freeTextSymptoms.join(", "),
+    freeTextSymptoms: [...entry.freeTextSymptoms],
     note: entry.note ?? "",
   };
 }
@@ -100,6 +100,7 @@ export function ConditionForm({
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof ConditionFormData, string>>>(
     {},
   );
+  const [freeTextInput, setFreeTextInput] = useState("");
 
   const recordedAtId = useId();
   const timezoneId = useId();
@@ -135,9 +136,31 @@ export function ConditionForm({
   }, [editingEntry]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const handleChange = (field: keyof ConditionFormData, value: string) => {
+  const handleChange = (field: keyof ConditionFormData, value: string | string[]) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+  };
+
+  const addFreeTextSymptom = (raw: string) => {
+    const value = raw.trim();
+    if (!value) {
+      return;
+    }
+    setForm((prev) => {
+      if (prev.freeTextSymptoms.includes(value)) {
+        return prev;
+      }
+      return { ...prev, freeTextSymptoms: [...prev.freeTextSymptoms, value] };
+    });
+    setFreeTextInput("");
+    setFieldErrors((prev) => ({ ...prev, freeTextSymptoms: undefined }));
+  };
+
+  const removeFreeTextSymptom = (index: number) => {
+    setForm((prev) => ({
+      ...prev,
+      freeTextSymptoms: prev.freeTextSymptoms.filter((_, i) => i !== index),
+    }));
   };
 
   const toggleSymptom = (typeId: string) => {
@@ -187,12 +210,11 @@ export function ConditionForm({
         errors[field.key] = result.error;
       }
     }
-    const freeText = form.freeTextSymptoms
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    if (freeText.length > 10) {
+    if (form.freeTextSymptoms.length > 10) {
       errors.freeTextSymptoms = "自由記述症状は10件までです。";
+    }
+    if (!isValidTimezone(form.timezone)) {
+      errors.timezone = "タイムゾーンは IANA 名（例: Asia/Tokyo）で指定してください。";
     }
     setFieldErrors(errors);
     return Object.keys(errors).length === 0;
@@ -210,16 +232,13 @@ export function ConditionForm({
       note: value.note.trim() || null,
     }));
 
-    const freeTextSymptoms = form.freeTextSymptoms
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .slice(0, 10);
+    const freeTextSymptoms = form.freeTextSymptoms.slice(0, 10);
 
+    const timezone = form.timezone.trim() || "Asia/Tokyo";
     onSubmit({
       ...(editingEntry ? { id: editingEntry.id, expectedRowVersion: editingEntry.rowVersion } : {}),
-      recordedAt: parseDateTimeLocal(form.recordedAt).toISOString(),
-      timezone: form.timezone.trim() || "Asia/Tokyo",
+      recordedAt: convertDateTimeLocalToTimezone(form.recordedAt, timezone).toISOString(),
+      timezone,
       overallScore: parseScore(form.overallScore).score,
       fatigueScore: parseScore(form.fatigueScore).score,
       energyScore: parseScore(form.energyScore).score,
@@ -399,18 +418,49 @@ export function ConditionForm({
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor={freeTextId}>
-            自由記述症状（カンマ区切り、10件まで）
+            自由記述症状（Enterで追加、10件まで）
           </label>
-          <input
-            id={freeTextId}
-            className={styles.input}
-            type="text"
-            value={form.freeTextSymptoms}
-            onChange={(event) => handleChange("freeTextSymptoms", event.target.value)}
-            disabled={disabled}
+          <div
+            className={styles.tagInput}
             aria-invalid={Boolean(fieldErrors.freeTextSymptoms)}
             aria-describedby={fieldErrors.freeTextSymptoms ? `${freeTextId}-error` : undefined}
-          />
+          >
+            {form.freeTextSymptoms.map((symptom, index) => (
+              <span key={`${symptom}-${index}`} className={styles.tag}>
+                {symptom}
+                <button
+                  type="button"
+                  className={styles.tagRemove}
+                  onClick={() => removeFreeTextSymptom(index)}
+                  disabled={disabled}
+                  aria-label={`${symptom}を削除`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              id={freeTextId}
+              className={styles.tagInputField}
+              type="text"
+              value={freeTextInput}
+              onChange={(event) => setFreeTextInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addFreeTextSymptom(freeTextInput);
+                } else if (event.key === "Backspace" && freeTextInput === "") {
+                  event.preventDefault();
+                  setForm((prev) => ({
+                    ...prev,
+                    freeTextSymptoms: prev.freeTextSymptoms.slice(0, -1),
+                  }));
+                }
+              }}
+              disabled={disabled}
+              placeholder="症状を入力して Enter"
+            />
+          </div>
           {fieldErrors.freeTextSymptoms ? (
             <p className={styles.fieldError} id={`${freeTextId}-error`}>
               {fieldErrors.freeTextSymptoms}

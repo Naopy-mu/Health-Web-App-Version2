@@ -9,7 +9,12 @@ import {
   SLEEP_KINDS,
   type SleepKind,
 } from "../units";
-import { parseDateTimeLocal, toDateTimeLocalValue } from "../utils";
+import {
+  convertDateTimeLocalToTimezone,
+  isValidTimezone,
+  parseDateTimeLocal,
+  toDateTimeLocalValue,
+} from "../utils";
 import styles from "../wellness.module.css";
 
 type SleepFormData = {
@@ -140,6 +145,9 @@ export function SleepForm({
     if (!form.outOfBedAt) {
       errors.outOfBedAt = "離床日時を入力してください。";
     }
+    if (!isValidTimezone(form.timezone.trim())) {
+      errors.timezone = "タイムゾーンは IANA 名（例: Asia/Tokyo）で指定してください。";
+    }
 
     const awakeningsCount = Number(form.awakeningsCount);
     if (
@@ -205,14 +213,15 @@ export function SleepForm({
     if (!validate()) {
       return;
     }
+    const timezone = form.timezone.trim() || "Asia/Tokyo";
     onSubmit({
       ...(editingEntry ? { id: editingEntry.id, expectedRowVersion: editingEntry.rowVersion } : {}),
       sleepKind: form.sleepKind,
-      bedAt: parseDateTimeLocal(form.bedAt).toISOString(),
-      sleepAt: parseDateTimeLocal(form.sleepAt).toISOString(),
-      wakeAt: parseDateTimeLocal(form.wakeAt).toISOString(),
-      outOfBedAt: parseDateTimeLocal(form.outOfBedAt).toISOString(),
-      timezone: form.timezone.trim() || "Asia/Tokyo",
+      bedAt: convertDateTimeLocalToTimezone(form.bedAt, timezone).toISOString(),
+      sleepAt: convertDateTimeLocalToTimezone(form.sleepAt, timezone).toISOString(),
+      wakeAt: convertDateTimeLocalToTimezone(form.wakeAt, timezone).toISOString(),
+      outOfBedAt: convertDateTimeLocalToTimezone(form.outOfBedAt, timezone).toISOString(),
+      timezone,
       awakeningsCount: Number(form.awakeningsCount),
       awakeMinutes: Number(form.awakeMinutes),
       quality: form.quality !== "" ? Number(form.quality) : null,

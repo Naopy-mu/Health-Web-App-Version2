@@ -25,12 +25,12 @@ import type {
   WellnessListResource,
 } from "./schema";
 import { deleteWellness, listWellness, saveWellness } from "./api";
+import type { ApiError } from "./api";
 import {
   buildWellnessRefetchQuery,
   interpretWellnessRefetch,
   type WellnessConflictTarget,
 } from "./conflict";
-import type { ApiError } from "./api";
 import { generateUuid } from "./utils";
 
 export type WellnessEntry = SleepEntry | HydrationEntry | ConditionEntry;
@@ -235,11 +235,25 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
     async (
       apiError: ApiError,
       status: number,
-      options: {
-        target: WellnessConflictTarget;
-        editingEntry: T | null;
-        setEditingEntry?: (entry: T | null) => void;
-      },
+      options:
+        | {
+            kind: "entry";
+            target: WellnessConflictTarget;
+            editingEntry: T | null;
+            setEditingEntry?: (entry: T | null) => void;
+          }
+        | {
+            kind: "goal";
+            resource: "sleep_goal" | "hydration_goal";
+            id: string;
+            editingGoal: WellnessGoal | null;
+            setEditingGoal?: (goal: WellnessGoal | null) => void;
+          }
+        | {
+            kind: "type";
+            resource: "beverage_type" | "symptom_type";
+            id: string;
+          },
     ) => {
       if (status === 401) {
         window.location.href = `/auth?next=/${resource}`;
@@ -266,21 +280,46 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
       setHydrationGoals(listResult.data.hydrationGoals);
       setContext(listResult.data.context);
 
-      // 対象特定クエリで最新の rowVersion を取得する
-      const refetchOutcome = await handleRefetchAfterConflict(options.target);
-
       let target: ConflictInfo["target"] = undefined;
 
-      if (refetchOutcome?.kind === "found") {
-        target = { kind: "entry", data: refetchOutcome.entry };
-        const current = options.editingEntry;
-        if (current && current.id === refetchOutcome.entry.id) {
-          const updated = refreshRowVersion(current, refetchOutcome.entry as T);
-          options.setEditingEntry?.(updated);
+      if (options.kind === "entry") {
+        // 対象特定クエリで最新の rowVersion を取得する
+        const refetchOutcome = await handleRefetchAfterConflict(options.target);
+
+        if (refetchOutcome?.kind === "found") {
+          target = { kind: "entry", data: refetchOutcome.entry };
+          const current = options.editingEntry;
+          if (current && current.id === refetchOutcome.entry.id) {
+            const updated = refreshRowVersion(current, refetchOutcome.entry as T);
+            options.setEditingEntry?.(updated);
+          }
+        } else if (refetchOutcome?.kind === "deleted") {
+          // 削除済みなら編集を破棄する
+          options.setEditingEntry?.(null);
         }
-      } else if (refetchOutcome?.kind === "deleted") {
-        // 削除済みなら編集を破棄する
-        options.setEditingEntry?.(null);
+      } else if (options.kind === "goal") {
+        const goals =
+          options.resource === "sleep_goal"
+            ? listResult.data.sleepGoals
+            : listResult.data.hydrationGoals;
+        const latest = goals.find((g) => g.id === options.id);
+        if (latest) {
+          target = { kind: "goal", data: latest };
+          const updated = refreshRowVersion(options.editingGoal, latest);
+          options.setEditingGoal?.(updated as WellnessGoal);
+        } else {
+          // 削除済みなら編集を破棄する
+          options.setEditingGoal?.(null);
+        }
+      } else if (options.kind === "type") {
+        const types =
+          options.resource === "beverage_type"
+            ? listResult.data.beverageTypes
+            : listResult.data.symptomTypes;
+        const latest = types.find((t) => t.id === options.id);
+        if (latest) {
+          target = { kind: "type", data: latest };
+        }
       }
 
       setConflict({
@@ -335,6 +374,7 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
 
         if (target) {
           await handleMutationError(result.error, result.status, {
+            kind: "entry",
             target,
             editingEntry: options.editingEntry,
             setEditingEntry: options.setEditingEntry,
@@ -395,6 +435,7 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
 
         if (target) {
           await handleMutationError(result.error, result.status, {
+            kind: "entry",
             target,
             editingEntry: options.editingEntry,
             setEditingEntry: options.setEditingEntry,
@@ -419,6 +460,10 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
   const saveGoal = useCallback(
     async (
       request: Extract<SaveWellnessRequest, { resource: "sleep_goal" | "hydration_goal" }>,
+      options: {
+        editingGoal: WellnessGoal | null;
+        setEditingGoal?: (goal: WellnessGoal | null) => void;
+      },
     ): Promise<boolean> => {
       setLoadingState("submitting");
       setError(null);
@@ -431,17 +476,13 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
           return false;
         }
         if (isConflictError(result.error)) {
-          const listResult = await listWellness(listQuery);
-          if (listResult.ok) {
-            setEntries(listResult.data.entries as T[]);
-            setNextCursor(listResult.data.page.nextCursor);
-            setBeverageTypes(listResult.data.beverageTypes);
-            setSymptomTypes(listResult.data.symptomTypes);
-            setSleepGoals(listResult.data.sleepGoals);
-            setHydrationGoals(listResult.data.hydrationGoals);
-            setContext(listResult.data.context);
-          }
-          setConflict({ code: result.error.code, message: result.error.message });
+          await handleMutationError(result.error, result.status, {
+            kind: "goal",
+            resource: request.resource,
+            id: options.editingGoal?.id ?? request.goal.id ?? "",
+            editingGoal: options.editingGoal,
+            setEditingGoal: options.setEditingGoal,
+          });
         } else {
           setError(result.error.message);
         }
@@ -453,11 +494,17 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
       setLoadingState("idle");
       return true;
     },
-    [listQuery, load, resource],
+    [handleMutationError, load, resource],
   );
 
   const removeGoal = useCallback(
-    async (request: DeleteWellnessRequest): Promise<boolean> => {
+    async (
+      request: DeleteWellnessRequest,
+      options: {
+        editingGoal: WellnessGoal | null;
+        setEditingGoal?: (goal: WellnessGoal | null) => void;
+      },
+    ): Promise<boolean> => {
       setLoadingState("submitting");
       setError(null);
       setConflict(null);
@@ -469,17 +516,13 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
           return false;
         }
         if (isConflictError(result.error)) {
-          const listResult = await listWellness(listQuery);
-          if (listResult.ok) {
-            setEntries(listResult.data.entries as T[]);
-            setNextCursor(listResult.data.page.nextCursor);
-            setBeverageTypes(listResult.data.beverageTypes);
-            setSymptomTypes(listResult.data.symptomTypes);
-            setSleepGoals(listResult.data.sleepGoals);
-            setHydrationGoals(listResult.data.hydrationGoals);
-            setContext(listResult.data.context);
-          }
-          setConflict({ code: result.error.code, message: result.error.message });
+          await handleMutationError(result.error, result.status, {
+            kind: "goal",
+            resource: request.resource as "sleep_goal" | "hydration_goal",
+            id: request.id,
+            editingGoal: options.editingGoal,
+            setEditingGoal: options.setEditingGoal,
+          });
         } else {
           setError(result.error.message);
         }
@@ -487,11 +530,14 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
         return false;
       }
 
+      if (options.editingGoal?.id === request.id) {
+        options.setEditingGoal?.(null);
+      }
       await load();
       setLoadingState("idle");
       return true;
     },
-    [listQuery, load, resource],
+    [handleMutationError, load, resource],
   );
 
   const saveType = useCallback(
@@ -509,17 +555,11 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
           return false;
         }
         if (isConflictError(result.error)) {
-          const listResult = await listWellness(listQuery);
-          if (listResult.ok) {
-            setEntries(listResult.data.entries as T[]);
-            setNextCursor(listResult.data.page.nextCursor);
-            setBeverageTypes(listResult.data.beverageTypes);
-            setSymptomTypes(listResult.data.symptomTypes);
-            setSleepGoals(listResult.data.sleepGoals);
-            setHydrationGoals(listResult.data.hydrationGoals);
-            setContext(listResult.data.context);
-          }
-          setConflict({ code: result.error.code, message: result.error.message });
+          await handleMutationError(result.error, result.status, {
+            kind: "type",
+            resource: request.resource,
+            id: request.type.id ?? "",
+          });
         } else {
           setError(result.error.message);
         }
@@ -531,7 +571,7 @@ export function useWellness<T extends WellnessEntry>(resource: WellnessListResou
       setLoadingState("idle");
       return true;
     },
-    [listQuery, load, resource],
+    [handleMutationError, load, resource],
   );
 
   const toggleArchiveType = useCallback(

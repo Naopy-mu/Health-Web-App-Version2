@@ -42,9 +42,7 @@ async function cleanupEntries(page: Page, resource: WellnessResource): Promise<v
     const response = await page.request.get(`/api/wellness?${params.toString()}`, {
       headers: { Origin: ORIGIN },
     });
-    if (!response.ok()) {
-      break;
-    }
+    expect(response, `cleanup GET /api/wellness?${params.toString()}`).toBeOK();
     const json = (await response.json()) as {
       data: {
         entries: { id: string; rowVersion: number }[];
@@ -60,11 +58,7 @@ async function cleanupEntries(page: Page, resource: WellnessResource): Promise<v
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
       data: { resource, id: entry.id, expectedRowVersion: entry.rowVersion },
     });
-    // 削除済みや競合は無視する
-    if (!response.ok()) {
-      const body = await response.json().catch(() => ({}));
-      console.warn(`cleanup ${resource} ${entry.id}:`, body);
-    }
+    expect(response, `cleanup DELETE /api/wellness ${resource} ${entry.id}`).toBeOK();
   }
 }
 
@@ -85,9 +79,7 @@ async function cleanupGoals(page: Page, resource: "sleep_goal" | "hydration_goal
     `/api/wellness?resource=${listResource}&order=desc&limit=500`,
     { headers: { Origin: ORIGIN } },
   );
-  if (!response.ok()) {
-    return;
-  }
+  expect(response, `cleanup GET /api/wellness goals ${resource}`).toBeOK();
   const json = (await response.json()) as {
     data: {
       sleepGoals: { id: string; rowVersion: number }[];
@@ -100,10 +92,7 @@ async function cleanupGoals(page: Page, resource: "sleep_goal" | "hydration_goal
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
       data: { resource, id: goal.id, expectedRowVersion: goal.rowVersion },
     });
-    if (!deleteResponse.ok()) {
-      const body = await deleteResponse.json().catch(() => ({}));
-      console.warn(`cleanup ${resource} ${goal.id}:`, body);
-    }
+    expect(deleteResponse, `cleanup DELETE /api/wellness ${resource} ${goal.id}`).toBeOK();
   }
 }
 
@@ -246,6 +235,7 @@ test.describe("Wellness happy path", () => {
 
     const suffix = uniqueSuffix();
     const recordedAt = new Date(Date.now() - 1000 * 60 * 60 * 4);
+    // カンマを含む自由記述症状を1件として追加し、分割されないことを確認する（S8）
     const symptomText = `のどの痛み, 鼻水-${suffix}`;
 
     await page.getByLabel("日時").fill(toDateTimeLocalInput(recordedAt));
@@ -256,21 +246,56 @@ test.describe("Wellness happy path", () => {
     await page.getByRole("spinbutton", { name: "痛み" }).fill("1");
     await page.getByRole("spinbutton", { name: "気分" }).fill("8");
     await page.getByLabel("体温（℃）").fill("36.5");
-    await page.getByLabel("自由記述症状（カンマ区切り、10件まで）").fill(symptomText);
-    await page.getByRole("button", { name: "記録する" }).click();
+
+    const freeTextInput = page.getByLabel("自由記述症状（Enterで追加、10件まで）");
+    await freeTextInput.fill(symptomText);
+    await freeTextInput.press("Enter");
     await expect(page.getByText(symptomText)).toBeVisible();
 
-    const row = page.locator("tr").filter({ hasText: symptomText });
+    await page.getByRole("button", { name: "記録する" }).click();
+    const listRegion = page.getByRole("region", { name: "体調記録一覧" });
+    const row = listRegion.locator("tr").filter({ hasText: symptomText });
+    await expect(row.getByRole("cell", { name: "7", exact: true })).toBeVisible();
+
     await row.getByRole("button", { name: "編集" }).click();
     await expect(page.getByRole("heading", { name: "体調記録を編集" })).toBeVisible();
-    await page.getByLabel("総合").fill("8");
+    await page.getByRole("spinbutton", { name: "総合" }).fill("8");
     await page.getByRole("button", { name: "更新する" }).click();
-    await expect(page.getByText(symptomText)).toBeVisible();
+
+    // 編集後は「総合」が 7→8 に変わることを確認（S11/S12）
+    const editedRow = listRegion.locator("tr").filter({ hasText: symptomText });
+    await expect(editedRow.locator('td[data-score-type="overall"]')).toHaveText("8");
+    await expect(editedRow.locator('td[data-score-type="overall"]')).not.toHaveText("7");
 
     page.on("dialog", (dialog) => dialog.accept());
-    const editedRow = page.locator("tr").filter({ hasText: symptomText });
     await editedRow.getByRole("button", { name: "削除" }).click();
-    await expect(page.getByText(symptomText)).not.toBeVisible();
+    await expect(listRegion.locator("tr").filter({ hasText: symptomText })).not.toBeVisible();
+  });
+
+  test("睡眠ページのタブがキーボードで操作でき aria-labelledby が有効な ID を参照する", async ({
+    page,
+  }) => {
+    await page.goto("/sleep");
+    await expect(page.getByRole("heading", { name: "睡眠", exact: true })).toBeVisible();
+    await expect(page.getByText("読み込み中…")).toBeHidden({ timeout: 45000 });
+
+    const recordsTab = page.getByRole("tab", { name: "睡眠記録" });
+    const goalsTab = page.getByRole("tab", { name: "目標" });
+
+    await recordsTab.focus();
+    await expect(recordsTab).toHaveAttribute("tabindex", "0");
+    await expect(goalsTab).toHaveAttribute("tabindex", "-1");
+
+    await page.keyboard.press("ArrowRight");
+    await expect(goalsTab).toBeFocused();
+    await expect(goalsTab).toHaveAttribute("tabindex", "0");
+    await expect(recordsTab).toHaveAttribute("tabindex", "-1");
+
+    const goalsPanel = page.locator('[role="tabpanel"]#sleep-panel-goals');
+    await expect(goalsPanel).toHaveAttribute("aria-labelledby", "sleep-tab-goals");
+
+    await page.keyboard.press("ArrowLeft");
+    await expect(recordsTab).toBeFocused();
   });
 });
 
@@ -354,6 +379,69 @@ test.describe("Wellness conflict recovery", () => {
       .getByRole("button", { name: "削除" })
       .click();
     await expect(pageA.getByText("3 / —")).not.toBeVisible();
+
+    await pageA.close();
+    await pageB.close();
+  });
+
+  test("水分目標の 409 競合後に最新値を取得して再試行できる", async ({ browser }) => {
+    const pageA = await browser.newPage();
+    const pageB = await browser.newPage();
+    await signIn(pageA, "/hydration");
+    await signIn(pageB, "/hydration");
+
+    await cleanupGoals(pageA, "hydration_goal");
+    await cleanupGoals(pageB, "hydration_goal");
+
+    await expect(pageA.getByRole("heading", { name: "水分", exact: true })).toBeVisible();
+    await expect(pageB.getByRole("heading", { name: "水分", exact: true })).toBeVisible();
+    await expect(pageA.getByText("読み込み中…")).toBeHidden({ timeout: 15000 });
+    await expect(pageB.getByText("読み込み中…")).toBeHidden({ timeout: 15000 });
+
+    const startDate = new Date().toISOString().slice(0, 10);
+
+    // pageA で目標作成
+    await pageA.getByRole("tab", { name: "目標" }).click();
+    await pageA.getByLabel("目標量（ml）").fill("1800");
+    await pageA.getByLabel("開始日").fill(startDate);
+    await pageA.getByRole("button", { name: "目標を設定する" }).click();
+    await expect(pageA.getByRole("cell", { name: "1800ml", exact: true })).toBeVisible();
+
+    // pageB でも表示されるまで待つ
+    await pageB.reload();
+    await pageB.getByRole("tab", { name: "目標" }).click();
+    await expect(pageB.getByRole("cell", { name: "1800ml", exact: true })).toBeVisible({
+      timeout: 15000,
+    });
+
+    // 両方で編集モードに入る
+    await pageA.getByRole("button", { name: "編集" }).first().click();
+    await pageB.getByRole("button", { name: "編集" }).first().click();
+
+    // pageA で更新（rowVersion が進む）
+    await pageA.getByLabel("目標量（ml）").fill("2000");
+    await pageA.getByRole("button", { name: "更新する" }).click();
+    await expect(pageA.getByRole("cell", { name: "2000ml", exact: true })).toBeVisible();
+
+    // pageB では古い rowVersion のまま更新しようとすると 409
+    await pageB.getByLabel("目標量（ml）").fill("2200");
+    await pageB.getByRole("button", { name: "更新する" }).click();
+    await expect(pageB.getByText("目標が競合しています")).toBeVisible({
+      timeout: 15000,
+    });
+
+    // 最新値を取得した状態で再試行し成功すること（C1）
+    await pageB.getByRole("button", { name: "更新する" }).click();
+    await expect(pageB.getByRole("cell", { name: "2200ml", exact: true })).toBeVisible({
+      timeout: 15000,
+    });
+
+    // 後片付け
+    await pageA.reload();
+    await pageA.getByRole("tab", { name: "目標" }).click();
+    pageA.on("dialog", (dialog) => dialog.accept());
+    await pageA.getByRole("button", { name: "削除" }).first().click();
+    await expect(pageA.getByRole("cell", { name: "2200ml", exact: true })).not.toBeVisible();
 
     await pageA.close();
     await pageB.close();

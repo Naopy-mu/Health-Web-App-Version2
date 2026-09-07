@@ -241,6 +241,12 @@
   color: var(--text-secondary);
 }
 
+.statusSecondary {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  margin-left: 0.5rem;
+}
+
 .statusSuccess {
   background: var(--success-bg);
   color: var(--success);
@@ -361,6 +367,67 @@
   padding: 0.75rem;
   border-radius: 0.5rem;
   margin-bottom: 1rem;
+}
+
+.tagInput {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.tagInput[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+.tagInputField {
+  flex: 1 1 8rem;
+  min-width: 8rem;
+  min-height: 32px;
+  padding: 0.25rem 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.tagInputField:focus {
+  outline: none;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  background: var(--muted);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.tagRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.tagRemove:hover {
+  background: var(--border);
+  color: var(--text);
 }
 
 @media (max-width: 640px) {
