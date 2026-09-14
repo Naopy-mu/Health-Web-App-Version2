@@ -229,7 +229,7 @@ Phase 4以降、各機能の一次担当・レビュー担当は3章の表を参
 | Phase 4-1b（睡眠・水分・体調・フロントエンド） | 完了 | feature/phase4-1b-wellness-frontend（4617f11）。Kimi K2.7 Code担当。破壊検証でタイムゾーン往復ずれ（sleep-form / condition-form）と冪等キー衝突（hydration-page）を検出し修正。レビュー判定は「マージ可（軽微な指摘あり）」とし、S-1〜S-3・N-2〜N-7 は `docs/known-issues.md` に記録。develop統合済み（fcc9438） |
 | Phase 4〜（それ以降） | 未着手 | 9.1節の分業方針（バックエンド: Claude Code／フロントエンド: Kimi K2.7 Code／レビュー: Codex）で進める |
 
-develop HEAD: `fcc9438`（Phase 4-1b統合時点）
+develop HEAD: `89b1dbc`（Phase 4-1b統合＋npm audit脆弱性修正の統合時点）
 
 ---
 
