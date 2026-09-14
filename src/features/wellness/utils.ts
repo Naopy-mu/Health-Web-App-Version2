@@ -58,6 +58,22 @@ export function parseDateTimeLocal(value: string): Date {
   return new Date(value);
 }
 
+function getDateTimeParts(date: Date, timezone: string) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
 /**
  * `<input type="datetime-local">` の値をブラウザのローカルタイムゾーンではなく、
  * 指定した IANA タイムゾーンの同じ日時として解釈し直す（S10）。
@@ -72,22 +88,25 @@ export function convertDateTimeLocalToTimezone(value: string, timezone: string):
     return localDate;
   }
 
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(localDate);
-  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
-  const tzString = `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
+  const tzString = getDateTimeParts(localDate, timezone);
   const tzDate = new Date(tzString);
   const offset = tzDate.getTime() - localDate.getTime();
   return new Date(localDate.getTime() - offset);
+}
+
+/**
+ * 保存済みの ISO 時刻を entry.timezone の壁時計として datetime-local 入力に戻す。
+ *
+ * ブラウザは `<input type="datetime-local">` を常にローカルタイムゾーンの壁時計で
+ * 表示するため、entry.timezone の壁時計がそのまま見えるよう、ブラウザローカルに
+ * おける同じ壁時計の Date に変換してからフォーマットする。
+ */
+export function toDateTimeLocalValueInTimezone(iso: string, timezone: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()) || !isValidTimezone(timezone)) {
+    return toDateTimeLocalValue(date);
+  }
+  return toDateTimeLocalValue(new Date(getDateTimeParts(date, timezone)));
 }
 
 export function sleepKindLabel(kind: SleepKind): string {
@@ -286,14 +305,18 @@ export function convertToUnit(amountMl: number, unit: HydrationUnit): number | n
   return Math.round((amountMl / factor) * 1000) / 1000;
 }
 
-export function formatDateTimeJa(iso: string): string {
+export function formatDateTimeJa(iso: string, timezone?: string): string {
   const date = new Date(iso);
-  return date.toLocaleString("ja-JP", {
+  const options: Intl.DateTimeFormatOptions = {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  });
+  };
+  if (timezone && isValidTimezone(timezone)) {
+    options.timeZone = timezone;
+  }
+  return date.toLocaleString("ja-JP", options);
 }
 
 export function formatDateJa(iso: string): string {

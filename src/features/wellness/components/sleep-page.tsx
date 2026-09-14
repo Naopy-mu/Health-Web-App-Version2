@@ -27,7 +27,8 @@ export function SleepPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
   const conflictRef = useRef<HTMLDivElement>(null);
-  const clientMutationIdRef = useRef<string | null>(null);
+  const entryMutationIdRef = useRef<string | null>(null);
+  const goalMutationIdRef = useRef<string | null>(null);
 
   const {
     entries,
@@ -50,15 +51,26 @@ export function SleepPage() {
     }
   }, [conflict]);
 
-  const getClientMutationId = useCallback(() => {
-    if (!clientMutationIdRef.current) {
-      clientMutationIdRef.current = generateUuid();
+  const getEntryMutationId = useCallback(() => {
+    if (!entryMutationIdRef.current) {
+      entryMutationIdRef.current = generateUuid();
     }
-    return clientMutationIdRef.current;
+    return entryMutationIdRef.current;
   }, []);
 
-  const clearClientMutationId = useCallback(() => {
-    clientMutationIdRef.current = null;
+  const clearEntryMutationId = useCallback(() => {
+    entryMutationIdRef.current = null;
+  }, []);
+
+  const getGoalMutationId = useCallback(() => {
+    if (!goalMutationIdRef.current) {
+      goalMutationIdRef.current = generateUuid();
+    }
+    return goalMutationIdRef.current;
+  }, []);
+
+  const clearGoalMutationId = useCallback(() => {
+    goalMutationIdRef.current = null;
   }, []);
 
   const handleSave = useCallback(
@@ -80,17 +92,17 @@ export function SleepPage() {
       setFormError(null);
       const request = {
         resource: "sleep" as const,
-        clientMutationId: getClientMutationId(),
+        clientMutationId: getEntryMutationId(),
         entry: input,
       };
       const ok = await saveEntry(request, { editingEntry, setEditingEntry });
       if (ok) {
         setEditingEntry(null);
-        clearClientMutationId();
+        clearEntryMutationId();
       }
       return ok;
     },
-    [saveEntry, editingEntry, getClientMutationId, clearClientMutationId],
+    [saveEntry, editingEntry, getEntryMutationId, clearEntryMutationId],
   );
 
   const handleDelete = useCallback(
@@ -245,7 +257,7 @@ export function SleepPage() {
               onSubmit={handleSave}
               onCancel={() => {
                 setEditingEntry(null);
-                clearClientMutationId();
+                clearEntryMutationId();
               }}
               disabled={isSubmitting}
               serverError={error}
@@ -299,13 +311,13 @@ export function SleepPage() {
                 const ok = await saveGoal(
                   {
                     resource: "sleep_goal",
-                    clientMutationId: getClientMutationId(),
+                    clientMutationId: getGoalMutationId(),
                     goal: goal as import("../schema").SleepGoalInput,
                   },
                   { editingGoal, setEditingGoal },
                 );
                 if (ok) {
-                  clearClientMutationId();
+                  clearGoalMutationId();
                 }
                 return ok;
               }}

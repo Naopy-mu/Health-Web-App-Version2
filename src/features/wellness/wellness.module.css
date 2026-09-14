@@ -381,7 +381,12 @@
   background: var(--surface);
 }
 
-.tagInput[aria-invalid="true"] {
+.tagInput:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: -1px;
+}
+
+.tagInputInvalid {
   border-color: var(--error);
 }
 

@@ -29,8 +29,9 @@ export function HydrationPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
   const conflictRef = useRef<HTMLDivElement>(null);
-  const clientMutationIdRef = useRef<string | null>(null);
-  const quickAddMutationIdRef = useRef<string | null>(null);
+  const entryMutationIdRef = useRef<string | null>(null);
+  const goalMutationIdRef = useRef<string | null>(null);
+  const quickAddMutationIdsRef = useRef<Record<string, string>>({});
 
   const {
     entries,
@@ -58,15 +59,26 @@ export function HydrationPage() {
     }
   }, [conflict]);
 
-  const getClientMutationId = useCallback(() => {
-    if (!clientMutationIdRef.current) {
-      clientMutationIdRef.current = generateUuid();
+  const getEntryMutationId = useCallback(() => {
+    if (!entryMutationIdRef.current) {
+      entryMutationIdRef.current = generateUuid();
     }
-    return clientMutationIdRef.current;
+    return entryMutationIdRef.current;
   }, []);
 
-  const clearClientMutationId = useCallback(() => {
-    clientMutationIdRef.current = null;
+  const clearEntryMutationId = useCallback(() => {
+    entryMutationIdRef.current = null;
+  }, []);
+
+  const getGoalMutationId = useCallback(() => {
+    if (!goalMutationIdRef.current) {
+      goalMutationIdRef.current = generateUuid();
+    }
+    return goalMutationIdRef.current;
+  }, []);
+
+  const clearGoalMutationId = useCallback(() => {
+    goalMutationIdRef.current = null;
   }, []);
 
   const handleSave = useCallback(
@@ -84,17 +96,17 @@ export function HydrationPage() {
       setFormError(null);
       const request = {
         resource: "hydration" as const,
-        clientMutationId: getClientMutationId(),
+        clientMutationId: getEntryMutationId(),
         entry: input,
       };
       const ok = await saveEntry(request, { editingEntry, setEditingEntry });
       if (ok) {
         setEditingEntry(null);
-        clearClientMutationId();
+        clearEntryMutationId();
       }
       return ok;
     },
-    [saveEntry, editingEntry, getClientMutationId, clearClientMutationId],
+    [saveEntry, editingEntry, getEntryMutationId, clearEntryMutationId],
   );
 
   const handleDelete = useCallback(
@@ -118,13 +130,13 @@ export function HydrationPage() {
   const handleQuickAdd = useCallback(
     async (type: BeverageType) => {
       setFormError(null);
-      if (!quickAddMutationIdRef.current) {
-        quickAddMutationIdRef.current = generateUuid();
+      if (!quickAddMutationIdsRef.current[type.id]) {
+        quickAddMutationIdsRef.current[type.id] = generateUuid();
       }
       const amount = type.defaultAmount ?? (type.defaultUnit === "l" ? 0.5 : 200);
       const request = {
         resource: "hydration" as const,
-        clientMutationId: quickAddMutationIdRef.current,
+        clientMutationId: quickAddMutationIdsRef.current[type.id],
         entry: {
           beverageTypeId: type.id,
           recordedAt: new Date().toISOString(),
@@ -137,7 +149,7 @@ export function HydrationPage() {
       };
       const ok = await saveEntry(request, { editingEntry: null, setEditingEntry: undefined });
       if (ok) {
-        quickAddMutationIdRef.current = null;
+        delete quickAddMutationIdsRef.current[type.id];
       }
       return ok;
     },
@@ -326,7 +338,7 @@ export function HydrationPage() {
               onSubmit={handleSave}
               onCancel={() => {
                 setEditingEntry(null);
-                clearClientMutationId();
+                clearEntryMutationId();
               }}
               disabled={isSubmitting}
               serverError={error}
@@ -380,13 +392,13 @@ export function HydrationPage() {
                 const ok = await saveGoal(
                   {
                     resource: "hydration_goal",
-                    clientMutationId: getClientMutationId(),
+                    clientMutationId: getGoalMutationId(),
                     goal: goal as import("../schema").HydrationGoalInput,
                   },
                   { editingGoal, setEditingGoal },
                 );
                 if (ok) {
-                  clearClientMutationId();
+                  clearGoalMutationId();
                 }
                 return ok;
               }}

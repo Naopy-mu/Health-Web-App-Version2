@@ -45,7 +45,7 @@ export function SleepList({ entries, onEdit, onDelete, disabled }: SleepListProp
             const efficiency = calculateSleepEfficiency(sleepMinutes, timeInBed);
             return (
               <tr key={entry.id}>
-                <td>{formatDateTimeJa(entry.sleepAt)}</td>
+                <td>{formatDateTimeJa(entry.sleepAt, entry.timezone)}</td>
                 <td>{sleepKindLabel(entry.sleepKind)}</td>
                 <td>{formatMinutes(sleepMinutes)}</td>
                 <td>{formatMinutes(timeInBed)}</td>

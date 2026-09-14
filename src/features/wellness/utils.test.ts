@@ -1,18 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   activeCustomSymptomCount,
   buildHydrationCsv,
   buildSleepCsv,
+  convertDateTimeLocalToTimezone,
   escapeCsvValue,
   formatDateTimeJa,
   formatMinutes,
   toDateInputValue,
   toDateTimeLocalValue,
+  toDateTimeLocalValueInTimezone,
 } from "./utils";
 import type { HydrationEntry, SleepEntry, SymptomType } from "./schema";
 
+function withTimezone(tz: string) {
+  const original = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = tz;
+  });
+  afterAll(() => {
+    process.env.TZ = original;
+  });
+}
+
 describe("toDateTimeLocalValue", () => {
+  withTimezone("Asia/Tokyo");
+
   it("Date を datetime-local 用にフォーマットする", () => {
     const date = new Date("2026-09-01T08:30:00+09:00");
     expect(toDateTimeLocalValue(date)).toBe("2026-09-01T08:30");
@@ -20,16 +34,112 @@ describe("toDateTimeLocalValue", () => {
 });
 
 describe("toDateInputValue", () => {
+  withTimezone("Asia/Tokyo");
+
   it("Date を date 入力用にフォーマットする", () => {
     const date = new Date("2026-09-01T08:30:00+09:00");
     expect(toDateInputValue(date)).toBe("2026-09-01");
   });
 });
 
+describe("toDateTimeLocalValueInTimezone", () => {
+  withTimezone("UTC");
+
+  it("保存済み ISO を entry.timezone の壁時計として datetime-local 値に戻す", () => {
+    // Asia/Tokyo の 2026-09-01 08:30 は UTC では 2026-08-31T23:30Z
+    const iso = "2026-09-01T08:30:00+09:00";
+    expect(toDateTimeLocalValueInTimezone(iso, "Asia/Tokyo")).toBe("2026-09-01T08:30");
+  });
+
+  it("convertDateTimeLocalToTimezone との往復で元の絶対時刻に戻る", () => {
+    const iso = "2026-09-01T08:30:00+09:00";
+    const localValue = toDateTimeLocalValueInTimezone(iso, "Asia/Tokyo");
+    const converted = convertDateTimeLocalToTimezone(localValue, "Asia/Tokyo");
+    expect(converted.toISOString()).toBe(new Date(iso).toISOString());
+  });
+
+  it("編集を繰り返しても日時がずれない（UTC ブラウザーで東京記録）", () => {
+    const iso = "2026-09-01T08:30:00+09:00";
+    let current = new Date(iso).toISOString();
+    for (let i = 0; i < 5; i += 1) {
+      const localValue = toDateTimeLocalValueInTimezone(current, "Asia/Tokyo");
+      current = convertDateTimeLocalToTimezone(localValue, "Asia/Tokyo").toISOString();
+    }
+    expect(current).toBe(new Date(iso).toISOString());
+  });
+
+  it("無効なタイムゾーンではローカル表示にフォールバックする", () => {
+    const iso = "2026-09-01T08:30:00+09:00";
+    expect(toDateTimeLocalValueInTimezone(iso, "Not/A/Zone")).toBe(
+      toDateTimeLocalValue(new Date(iso)),
+    );
+  });
+
+  describe.each([
+    {
+      timezone: "America/New_York",
+      iso: "2026-01-15T14:00:00-05:00",
+      expectedLocal: "2026-01-15T14:00",
+    },
+    {
+      timezone: "Europe/London",
+      iso: "2026-01-15T14:00:00+00:00",
+      expectedLocal: "2026-01-15T14:00",
+    },
+    {
+      timezone: "Pacific/Auckland",
+      iso: "2026-01-15T09:00:00+13:00",
+      expectedLocal: "2026-01-15T09:00",
+    },
+    {
+      timezone: "Asia/Tokyo",
+      iso: "2026-09-01T08:30:00+09:00",
+      expectedLocal: "2026-09-01T08:30",
+    },
+  ])("読み書き対称化（$timezone）", ({ timezone, iso, expectedLocal }) => {
+    it("保存済み ISO を entry.timezone の壁時計に戻す", () => {
+      expect(toDateTimeLocalValueInTimezone(iso, timezone)).toBe(expectedLocal);
+    });
+
+    it("datetime-local 値を entry.timezone の絶対時刻に変換する", () => {
+      const converted = convertDateTimeLocalToTimezone(expectedLocal, timezone);
+      expect(converted.toISOString()).toBe(new Date(iso).toISOString());
+    });
+
+    it("5 回編集しても絶対時刻がずれない", () => {
+      let current = new Date(iso).toISOString();
+      for (let i = 0; i < 5; i += 1) {
+        const localValue = toDateTimeLocalValueInTimezone(current, timezone);
+        current = convertDateTimeLocalToTimezone(localValue, timezone).toISOString();
+      }
+      expect(current).toBe(new Date(iso).toISOString());
+    });
+  });
+});
+
 describe("formatDateTimeJa", () => {
-  it("UTC ISO 文字列をローカル日時表示に変換する", () => {
-    const date = new Date("2026-09-01T08:30:00+09:00");
-    expect(formatDateTimeJa(date.toISOString())).toMatch(/9月1日 08:30/);
+  describe("ブラウザー TZ=Asia/Tokyo", () => {
+    withTimezone("Asia/Tokyo");
+
+    it("UTC ISO 文字列をローカル日時表示に変換する", () => {
+      const date = new Date("2026-09-01T08:30:00+09:00");
+      expect(formatDateTimeJa(date.toISOString())).toMatch(/9月1日 08:30/);
+    });
+  });
+
+  describe("ブラウザー TZ=UTC", () => {
+    withTimezone("UTC");
+
+    it("タイムゾーンを指定すると entry.timezone の壁時計で表示する", () => {
+      const iso = "2026-09-01T08:30:00+09:00";
+      expect(formatDateTimeJa(iso, "Asia/Tokyo")).toMatch(/9月1日 08:30/);
+    });
+
+    it("タイムゾーンを省略するとブラウザー UTC で表示する", () => {
+      const iso = "2026-09-01T08:30:00+09:00";
+      // UTC では 2026-08-31T23:30Z
+      expect(formatDateTimeJa(iso)).toMatch(/8月31日 23:30/);
+    });
   });
 });
 

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ConditionEntry, SymptomType } from "../schema";
 import { ConditionForm } from "./condition-form";
@@ -38,6 +38,17 @@ afterEach(() => {
   cleanup();
   vi.resetAllMocks();
 });
+
+function withTimezone(tz: string, fn: () => void) {
+  const original = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = tz;
+  });
+  afterAll(() => {
+    process.env.TZ = original;
+  });
+  fn();
+}
 
 describe("ConditionForm", () => {
   it("アーカイブ済みの症状は選択肢に表示されない", async () => {
@@ -118,5 +129,179 @@ describe("ConditionForm", () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     const submitted = onSubmit.mock.calls[0][0] as ConditionEntry;
     expect(submitted.freeTextSymptoms).toEqual(["のどの痛み, 鼻水"]);
+  });
+
+  describe("タイムゾーン往復変換（UTC ブラウザー）", () => {
+    withTimezone("UTC", () => {
+      it("Asia/Tokyo の記録を編集しても絶対時刻がずれない", async () => {
+        const onSubmit = vi.fn();
+        const entry: ConditionEntry = {
+          id: "11111111-1111-1111-1111-111111111111",
+          recordedAt: "2026-09-01T08:30:00+09:00",
+          timezone: "Asia/Tokyo",
+          overallScore: null,
+          fatigueScore: null,
+          energyScore: null,
+          stressScore: null,
+          painScore: null,
+          moodScore: null,
+          bodyTemperatureC: null,
+          freeTextSymptoms: [],
+          symptoms: [],
+          note: null,
+          rowVersion: 1,
+          clientMutationId: null,
+          createdAt: "2026-09-01T08:30:00+09:00",
+          updatedAt: "2026-09-01T08:30:00+09:00",
+        };
+
+        render(
+          <ConditionForm
+            symptomTypes={[]}
+            editingEntry={entry}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        expect((screen.getByLabelText("日時") as HTMLInputElement).value).toBe("2026-09-01T08:30");
+
+        fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+        const submitted = onSubmit.mock.calls[0][0] as ConditionEntry;
+        expect(new Date(submitted.recordedAt).toISOString()).toBe(
+          new Date(entry.recordedAt).toISOString(),
+        );
+      });
+
+      it("America/New_York の記録を編集しても絶対時刻がずれない", async () => {
+        const onSubmit = vi.fn();
+        const entry: ConditionEntry = {
+          id: "11111111-1111-1111-1111-111111111111",
+          recordedAt: "2026-01-15T14:00:00-05:00",
+          timezone: "America/New_York",
+          overallScore: null,
+          fatigueScore: null,
+          energyScore: null,
+          stressScore: null,
+          painScore: null,
+          moodScore: null,
+          bodyTemperatureC: null,
+          freeTextSymptoms: [],
+          symptoms: [],
+          note: null,
+          rowVersion: 1,
+          clientMutationId: null,
+          createdAt: "2026-01-15T14:00:00-05:00",
+          updatedAt: "2026-01-15T14:00:00-05:00",
+        };
+
+        render(
+          <ConditionForm
+            symptomTypes={[]}
+            editingEntry={entry}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        expect((screen.getByLabelText("日時") as HTMLInputElement).value).toBe("2026-01-15T14:00");
+
+        fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+        const submitted = onSubmit.mock.calls[0][0] as ConditionEntry;
+        expect(new Date(submitted.recordedAt).toISOString()).toBe(
+          new Date(entry.recordedAt).toISOString(),
+        );
+      });
+
+      it("タイムゾーンの末尾空白は trim されて受理される", async () => {
+        const onSubmit = vi.fn();
+        render(
+          <ConditionForm
+            symptomTypes={[]}
+            editingEntry={null}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        const timezoneInput = screen.getByLabelText("タイムゾーン") as HTMLInputElement;
+        fireEvent.change(timezoneInput, { target: { value: "Asia/Tokyo " } });
+        fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+        const submitted = onSubmit.mock.calls[0][0] as ConditionEntry;
+        expect(submitted.timezone).toBe("Asia/Tokyo");
+      });
+
+      it("無効なタイムゾーンの検証エラーを表示する", async () => {
+        const onSubmit = vi.fn();
+        render(
+          <ConditionForm
+            symptomTypes={[]}
+            editingEntry={null}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        const timezoneInput = screen.getByLabelText("タイムゾーン") as HTMLInputElement;
+        fireEvent.change(timezoneInput, { target: { value: "Not/A/Zone" } });
+        fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+        await waitFor(() =>
+          expect(
+            screen.getByText("タイムゾーンは IANA 名（例: Asia/Tokyo）で指定してください。"),
+          ).toBeInTheDocument(),
+        );
+        expect(timezoneInput).toHaveAttribute("aria-invalid", "true");
+        expect(onSubmit).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe("自由記述症状のタグ入力", () => {
+    it("aria-invalid・aria-describedby は input 要素側に付く", async () => {
+      const onSubmit = vi.fn();
+      render(
+        <ConditionForm
+          symptomTypes={[]}
+          editingEntry={null}
+          onSubmit={onSubmit}
+          onCancel={vi.fn()}
+          disabled={false}
+          serverError={null}
+        />,
+      );
+
+      const input = screen.getByLabelText("自由記述症状（Enterで追加、10件まで）");
+      // 11 件追加して上限エラーを発生させる
+      for (let i = 0; i < 11; i += 1) {
+        fireEvent.change(input, { target: { value: `症状${i}` } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      }
+
+      fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+      await waitFor(() =>
+        expect(screen.getByText("自由記述症状は10件までです。")).toBeInTheDocument(),
+      );
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      expect(input).toHaveAttribute("aria-describedby");
+      const wrapper = input.parentElement;
+      expect(wrapper).not.toHaveAttribute("aria-invalid");
+      expect(wrapper).not.toHaveAttribute("aria-describedby");
+    });
   });
 });

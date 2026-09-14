@@ -14,6 +14,7 @@ import {
   isValidTimezone,
   parseDateTimeLocal,
   toDateTimeLocalValue,
+  toDateTimeLocalValueInTimezone,
 } from "../utils";
 import styles from "../wellness.module.css";
 
@@ -54,10 +55,10 @@ function emptyForm(): SleepFormData {
 function entryToForm(entry: SleepEntry): SleepFormData {
   return {
     sleepKind: entry.sleepKind,
-    bedAt: toDateTimeLocalValue(new Date(entry.bedAt)),
-    sleepAt: toDateTimeLocalValue(new Date(entry.sleepAt)),
-    wakeAt: toDateTimeLocalValue(new Date(entry.wakeAt)),
-    outOfBedAt: toDateTimeLocalValue(new Date(entry.outOfBedAt)),
+    bedAt: toDateTimeLocalValueInTimezone(entry.bedAt, entry.timezone),
+    sleepAt: toDateTimeLocalValueInTimezone(entry.sleepAt, entry.timezone),
+    wakeAt: toDateTimeLocalValueInTimezone(entry.wakeAt, entry.timezone),
+    outOfBedAt: toDateTimeLocalValueInTimezone(entry.outOfBedAt, entry.timezone),
     timezone: entry.timezone,
     awakeningsCount: String(entry.awakeningsCount),
     awakeMinutes: String(entry.awakeMinutes),
@@ -371,7 +372,14 @@ export function SleepForm({
               value={form.timezone}
               onChange={(event) => handleChange("timezone", event.target.value)}
               disabled={disabled}
+              aria-invalid={Boolean(fieldErrors.timezone)}
+              aria-describedby={fieldErrors.timezone ? `${timezoneId}-error` : undefined}
             />
+            {fieldErrors.timezone ? (
+              <p className={styles.fieldError} id={`${timezoneId}-error`}>
+                {fieldErrors.timezone}
+              </p>
+            ) : null}
           </div>
         </div>
 

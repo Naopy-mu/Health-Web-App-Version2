@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { SleepEntry } from "../schema";
 import { SleepForm } from "./sleep-form";
@@ -23,6 +23,17 @@ function pad(n: number) {
 
 function fmt(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function withTimezone(tz: string, fn: () => void) {
+  const original = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = tz;
+  });
+  afterAll(() => {
+    process.env.TZ = original;
+  });
+  fn();
 }
 
 describe("SleepForm", () => {
@@ -173,5 +184,138 @@ describe("SleepForm", () => {
     const submitted = onSubmit.mock.calls[0][0] as SleepEntry;
     expect(submitted.quality).toBe(4);
     expect(submitted.sleepKind).toBe("night");
+  });
+
+  describe("タイムゾーン往復変換（UTC ブラウザー）", () => {
+    withTimezone("UTC", () => {
+      it("Asia/Tokyo の記録を編集しても絶対時刻がずれない", async () => {
+        const onSubmit = vi.fn();
+        const entry: SleepEntry = {
+          id: "11111111-1111-1111-1111-111111111111",
+          sleepKind: "night",
+          bedAt: "2026-09-01T22:30:00+09:00",
+          sleepAt: "2026-09-01T23:00:00+09:00",
+          wakeAt: "2026-09-02T06:30:00+09:00",
+          outOfBedAt: "2026-09-02T06:45:00+09:00",
+          timezone: "Asia/Tokyo",
+          awakeningsCount: 0,
+          awakeMinutes: 0,
+          quality: null,
+          morningFeeling: null,
+          note: null,
+          sleepMinutes: 450,
+          timeInBedMinutes: 495,
+          rowVersion: 1,
+          clientMutationId: null,
+          createdAt: "2026-09-01T23:00:00+09:00",
+          updatedAt: "2026-09-02T06:45:00+09:00",
+        };
+
+        render(
+          <SleepForm
+            editingEntry={entry}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        expect((screen.getByLabelText("就床") as HTMLInputElement).value).toBe("2026-09-01T22:30");
+        expect((screen.getByLabelText("入眠") as HTMLInputElement).value).toBe("2026-09-01T23:00");
+        expect((screen.getByLabelText("起床") as HTMLInputElement).value).toBe("2026-09-02T06:30");
+        expect((screen.getByLabelText("離床") as HTMLInputElement).value).toBe("2026-09-02T06:45");
+
+        fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+        const submitted = onSubmit.mock.calls[0][0] as SleepEntry;
+        expect(new Date(submitted.bedAt).toISOString()).toBe(new Date(entry.bedAt).toISOString());
+        expect(new Date(submitted.sleepAt).toISOString()).toBe(
+          new Date(entry.sleepAt).toISOString(),
+        );
+        expect(new Date(submitted.wakeAt).toISOString()).toBe(new Date(entry.wakeAt).toISOString());
+        expect(new Date(submitted.outOfBedAt).toISOString()).toBe(
+          new Date(entry.outOfBedAt).toISOString(),
+        );
+      });
+
+      it("America/New_York の記録を編集しても絶対時刻がずれない", async () => {
+        const onSubmit = vi.fn();
+        const entry: SleepEntry = {
+          id: "11111111-1111-1111-1111-111111111111",
+          sleepKind: "night",
+          bedAt: "2026-01-15T22:30:00-05:00",
+          sleepAt: "2026-01-15T23:00:00-05:00",
+          wakeAt: "2026-01-16T06:30:00-05:00",
+          outOfBedAt: "2026-01-16T06:45:00-05:00",
+          timezone: "America/New_York",
+          awakeningsCount: 0,
+          awakeMinutes: 0,
+          quality: null,
+          morningFeeling: null,
+          note: null,
+          sleepMinutes: 450,
+          timeInBedMinutes: 495,
+          rowVersion: 1,
+          clientMutationId: null,
+          createdAt: "2026-01-15T23:00:00-05:00",
+          updatedAt: "2026-01-16T06:45:00-05:00",
+        };
+
+        render(
+          <SleepForm
+            editingEntry={entry}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        expect((screen.getByLabelText("就床") as HTMLInputElement).value).toBe("2026-01-15T22:30");
+        expect((screen.getByLabelText("入眠") as HTMLInputElement).value).toBe("2026-01-15T23:00");
+        expect((screen.getByLabelText("起床") as HTMLInputElement).value).toBe("2026-01-16T06:30");
+        expect((screen.getByLabelText("離床") as HTMLInputElement).value).toBe("2026-01-16T06:45");
+
+        fireEvent.click(screen.getByRole("button", { name: "更新する" }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+        const submitted = onSubmit.mock.calls[0][0] as SleepEntry;
+        expect(new Date(submitted.bedAt).toISOString()).toBe(new Date(entry.bedAt).toISOString());
+        expect(new Date(submitted.sleepAt).toISOString()).toBe(
+          new Date(entry.sleepAt).toISOString(),
+        );
+        expect(new Date(submitted.wakeAt).toISOString()).toBe(new Date(entry.wakeAt).toISOString());
+        expect(new Date(submitted.outOfBedAt).toISOString()).toBe(
+          new Date(entry.outOfBedAt).toISOString(),
+        );
+      });
+
+      it("無効なタイムゾーンの検証エラーを表示する", async () => {
+        const onSubmit = vi.fn();
+        render(
+          <SleepForm
+            editingEntry={null}
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+            disabled={false}
+            serverError={null}
+          />,
+        );
+
+        const timezoneInput = screen.getByLabelText("タイムゾーン") as HTMLInputElement;
+        fireEvent.change(timezoneInput, { target: { value: "Not/A/Zone" } });
+        fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+        await waitFor(() =>
+          expect(
+            screen.getByText("タイムゾーンは IANA 名（例: Asia/Tokyo）で指定してください。"),
+          ).toBeInTheDocument(),
+        );
+        expect(timezoneInput).toHaveAttribute("aria-invalid", "true");
+        expect(onSubmit).not.toHaveBeenCalled();
+      });
+    });
   });
 });

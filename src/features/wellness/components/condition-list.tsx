@@ -36,7 +36,7 @@ export function ConditionList({ entries, onEdit, onDelete, disabled }: Condition
         <tbody>
           {entries.map((entry) => (
             <tr key={entry.id}>
-              <td>{formatDateTimeJa(entry.recordedAt)}</td>
+              <td>{formatDateTimeJa(entry.recordedAt, entry.timezone)}</td>
               <td data-score-type="overall">{entry.overallScore ?? "—"}</td>
               <td data-score-type="fatigue">{entry.fatigueScore ?? "—"}</td>
               <td data-score-type="energy">{entry.energyScore ?? "—"}</td>

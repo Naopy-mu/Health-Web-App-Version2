@@ -63,6 +63,7 @@ export function WellnessChart({
   const chartData = sorted.map((entry) => ({
     date: "sleepAt" in entry ? entry.sleepAt : entry.recordedAt,
     value: (entry as unknown as Record<string, number>)[dataKey],
+    timezone: "sleepAt" in entry ? entry.timezone : undefined,
   }));
 
   return (
@@ -91,7 +92,12 @@ export function WellnessChart({
                     valueFormatter ? valueFormatter(value as number) : String(value),
                     yLabel,
                   ]}
-                  labelFormatter={(label: unknown) => formatDateTimeJa(String(label))}
+                  labelFormatter={(label: unknown, payload: readonly unknown[]) => {
+                    const timezone = (
+                      payload?.[0] as { payload?: { timezone?: string } } | undefined
+                    )?.payload?.timezone;
+                    return formatDateTimeJa(String(label), timezone);
+                  }}
                 />
                 <Line
                   type="monotone"
@@ -127,7 +133,7 @@ export function WellnessChart({
               <tbody>
                 {chartData.map((row) => (
                   <tr key={row.date}>
-                    <td>{formatDateTimeJa(row.date)}</td>
+                    <td>{formatDateTimeJa(row.date, row.timezone)}</td>
                     <td>{valueFormatter ? valueFormatter(row.value) : row.value}</td>
                   </tr>
                 ))}

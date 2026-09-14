@@ -3,7 +3,12 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import type { ConditionEntry, SymptomType } from "../schema";
-import { convertDateTimeLocalToTimezone, isValidTimezone, toDateTimeLocalValue } from "../utils";
+import {
+  convertDateTimeLocalToTimezone,
+  isValidTimezone,
+  toDateTimeLocalValue,
+  toDateTimeLocalValueInTimezone,
+} from "../utils";
 import styles from "../wellness.module.css";
 
 type ConditionFormData = {
@@ -47,7 +52,7 @@ function emptyForm(): ConditionFormData {
 
 function entryToForm(entry: ConditionEntry): ConditionFormData {
   return {
-    recordedAt: toDateTimeLocalValue(new Date(entry.recordedAt)),
+    recordedAt: toDateTimeLocalValueInTimezone(entry.recordedAt, entry.timezone),
     timezone: entry.timezone,
     overallScore: entry.overallScore !== null ? String(entry.overallScore) : "",
     fatigueScore: entry.fatigueScore !== null ? String(entry.fatigueScore) : "",
@@ -213,7 +218,7 @@ export function ConditionForm({
     if (form.freeTextSymptoms.length > 10) {
       errors.freeTextSymptoms = "自由記述症状は10件までです。";
     }
-    if (!isValidTimezone(form.timezone)) {
+    if (!isValidTimezone(form.timezone.trim())) {
       errors.timezone = "タイムゾーンは IANA 名（例: Asia/Tokyo）で指定してください。";
     }
     setFieldErrors(errors);
@@ -302,7 +307,14 @@ export function ConditionForm({
               value={form.timezone}
               onChange={(event) => handleChange("timezone", event.target.value)}
               disabled={disabled}
+              aria-invalid={Boolean(fieldErrors.timezone)}
+              aria-describedby={fieldErrors.timezone ? `${timezoneId}-error` : undefined}
             />
+            {fieldErrors.timezone ? (
+              <p className={styles.fieldError} id={`${timezoneId}-error`}>
+                {fieldErrors.timezone}
+              </p>
+            ) : null}
           </div>
 
           <div className={styles.field}>
@@ -421,9 +433,7 @@ export function ConditionForm({
             自由記述症状（Enterで追加、10件まで）
           </label>
           <div
-            className={styles.tagInput}
-            aria-invalid={Boolean(fieldErrors.freeTextSymptoms)}
-            aria-describedby={fieldErrors.freeTextSymptoms ? `${freeTextId}-error` : undefined}
+            className={`${styles.tagInput}${fieldErrors.freeTextSymptoms ? ` ${styles.tagInputInvalid}` : ""}`}
           >
             {form.freeTextSymptoms.map((symptom, index) => (
               <span key={`${symptom}-${index}`} className={styles.tag}>
@@ -445,6 +455,8 @@ export function ConditionForm({
               type="text"
               value={freeTextInput}
               onChange={(event) => setFreeTextInput(event.target.value)}
+              aria-invalid={Boolean(fieldErrors.freeTextSymptoms)}
+              aria-describedby={fieldErrors.freeTextSymptoms ? `${freeTextId}-error` : undefined}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
