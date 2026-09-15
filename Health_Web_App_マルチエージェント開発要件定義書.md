@@ -227,9 +227,11 @@ Phase 4以降、各機能の一次担当・レビュー担当は3章の表を参
 | Phase 3b（身体測定・フロントエンド） | 完了 | feature/phase3b-measurements-frontend。Claude Codeレビュー6往復（409競合からの回復不能パターンが複数条件で繰り返し発見・修正）を経てdevelop統合済み（38e10b2） |
 | Phase 4-1a（睡眠・水分・体調・バックエンド） | 完了 | feature/phase4-1a-wellness-backend（c3243b3）。Phase3bの教訓（409後の対象特定失敗）を設計段階で回避（所有者＋記録日時＋種別の一意制約）。Codexレビュー3往復（409対象特定・sleep制約・トランザクション原子性、復元時のアーカイブ上限、独自種別上限チェックの直列化と冪等再実行）を経てdevelop統合済み（ddadb8d） |
 | Phase 4-1b（睡眠・水分・体調・フロントエンド） | 完了 | feature/phase4-1b-wellness-frontend（4617f11）。Kimi K2.7 Code担当。破壊検証でタイムゾーン往復ずれ（sleep-form / condition-form）と冪等キー衝突（hydration-page）を検出し修正。レビュー判定は「マージ可（軽微な指摘あり）」とし、S-1〜S-3・N-2〜N-7 は `docs/known-issues.md` に記録。develop統合済み（fcc9438） |
+| Phase 4-2a（サプリメント・バックエンド） | 完了 | feature/phase4-2a-supplements-backend。Claude Code担当。実装仕様書5.6節のFEFO在庫消費・負在庫拒否・取消復元を原子的RPC（`record_supplement_intake` / `void_supplement_intake`）で実装。Phase4-1aの教訓（所有者単位の`pg_advisory_xact_lock`）を在庫の直列化へ適用し、負在庫は`remaining_quantity >= 0`のCHECK制約でも二重に禁じた。服用記録・在庫の動きはauthenticatedからSELECTのみ（RPCを迂回する書き込み経路を残さない）。API契約は`docs/api/supplements.md`。**Codexレビュー未実施** |
+| Phase 4-2b（サプリメント・フロントエンド） | 未着手 | Kimi K2.7 Code担当。`docs/api/supplements.md` と `src/features/supplements/schema.ts` を前提に実装する |
 | Phase 4〜（それ以降） | 未着手 | 9.1節の分業方針（バックエンド: Claude Code／フロントエンド: Kimi K2.7 Code／レビュー: Codex）で進める |
 
-develop HEAD: `89b1dbc`（Phase 4-1b統合＋npm audit脆弱性修正の統合時点）
+develop HEAD: `934c5ce`（Phase 4-1b統合＋npm audit脆弱性修正＋CIゲート追加の時点）
 
 ---
 

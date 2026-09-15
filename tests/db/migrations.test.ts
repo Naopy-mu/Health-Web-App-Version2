@@ -49,6 +49,13 @@ describe("supabase/migrations (実装仕様書 6章 / 12章)", () => {
       "hydration_goals",
       "sleep_entries",
       "sleep_goals",
+      // Phase 4-2a: サプリメント（実装仕様書 5.6節）
+      "supplement_intake_logs",
+      "supplement_inventory_lots",
+      "supplement_inventory_movements",
+      "supplement_mutation_log",
+      "supplement_products",
+      "supplement_schedules",
       "symptom_types",
       // Phase 1: ID・プロフィール（実装仕様書 6.1節）
       "user_profiles",
@@ -59,11 +66,12 @@ describe("supabase/migrations (実装仕様書 6章 / 12章)", () => {
 
   it("未着手のフェーズの機能テーブルはまだ作らない", async () => {
     // Phase 3a は身体測定（実装仕様書 5.3節）、Phase 4-1a は睡眠・水分・体調
-    // （5.5節）まで。運動・食事・習慣などは後続フェーズ。
+    // （5.5節）、Phase 4-2a はサプリメント（5.6節）まで。
+    // 運動・食事・習慣・パントリーなどは後続フェーズ。
     const { rows } = await db.query<{ count: string }>(
       `select count(*)::text as count from information_schema.tables
        where table_schema = 'public'
-         and table_name in ('workout_sessions', 'meal_recipes', 'habits', 'supplement_products')`,
+         and table_name in ('workout_sessions', 'meal_recipes', 'habits', 'pantry_inventory_lots')`,
     );
 
     expect(rows[0]?.count).toBe("0");

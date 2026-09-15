@@ -21,6 +21,10 @@ Phase 1「DBスキーマ基盤」で用意した共通ルールをまとめる�
 | `supabase/migrations/20260903000300_wellness_seed.sql`                 | 既定カタログの seed RPC と症状リンクの全置換 RPC（5.5節）                                                |
 | `supabase/migrations/20260903000400_wellness_mutation_log.sql`         | 睡眠・水分・体調の冪等キー履歴（5.5節・6.4節）。追記専用                                                 |
 | `supabase/migrations/20260903000500_wellness_condition_save.sql`       | 体調記録の本体と症状リンクを1トランザクションで保存する `save_condition_entry()`（5.5節・6.4節）         |
+| `supabase/migrations/20260915000100_supplements_core.sql`              | サプリメントの5テーブル（5.6節）。**負在庫を CHECK 制約で禁じた例**と在庫の動きの監査証跡                |
+| `supabase/migrations/20260915000200_supplements_rls.sql`               | サプリメントの RLS（6.5節・9章）。**服用記録を server-only 書き込みにした例**                            |
+| `supabase/migrations/20260915000300_supplements_mutation_log.sql`      | サプリメントの冪等キー履歴（5.6節・6.4節）。追記専用                                                     |
+| `supabase/migrations/20260915000400_supplements_intake.sql`            | FEFO 在庫消費と取消復元の原子的RPC `record_supplement_intake()` / `void_supplement_intake()`（5.6節）    |
 
 migration のファイル名は `YYYYMMDDHHMMSS_<snake_case>.sql`。番号は既存の最大値より必ず大きくする。
 

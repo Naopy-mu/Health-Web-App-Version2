@@ -23,6 +23,11 @@ const OWNED_MUTABLE_TABLES = [
   "hydration_goals",
   "sleep_entries",
   "sleep_goals",
+  // Phase 4-2a: サプリメント（実装仕様書 5.6節）
+  "supplement_intake_logs",
+  "supplement_inventory_lots",
+  "supplement_products",
+  "supplement_schedules",
   "symptom_types",
   // Phase 1: ID・プロフィール（実装仕様書 6.1節）
   "user_profiles",
@@ -30,7 +35,18 @@ const OWNED_MUTABLE_TABLES = [
 ] as const;
 
 /** 追記専用（row_version も楽観ロックも持たない）テーブル。 */
-const APPEND_ONLY_TABLES = ["body_measurement_mutation_log", "wellness_mutation_log"] as const;
+const APPEND_ONLY_TABLES = [
+  "body_measurement_mutation_log",
+  "supplement_mutation_log",
+  "wellness_mutation_log",
+] as const;
+
+/**
+ * 所有者は持つが冪等キーも版番号も持たない追記専用テーブル。
+ * 在庫の動き（実装仕様書 5.6節の監査証跡）は、親（在庫ロット）の更新に伴って
+ * 作られる従属データで、独自の冪等キーを持たない。再送の引き当ては親のキーで行う。
+ */
+const OWNER_ONLY_TABLES = ["supplement_inventory_movements"] as const;
 
 describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", () => {
   let db: PGlite;
@@ -66,6 +82,11 @@ describe("版番号・冪等性の共通パターン (実装仕様書 6.4節)", 
         { table_name, column_name: "client_mutation_id", data_type: "uuid" },
         { table_name, column_name: "owner_id", data_type: "uuid" },
       ]),
+      ...OWNER_ONLY_TABLES.map((table_name) => ({
+        table_name,
+        column_name: "owner_id",
+        data_type: "uuid",
+      })),
     ].sort(
       (a, b) =>
         a.table_name.localeCompare(b.table_name, "en") ||
