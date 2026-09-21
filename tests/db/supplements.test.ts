@@ -453,6 +453,66 @@ describe("サプリメントのスキーマ (実装仕様書 5.6節)", () => {
     expect(message).toContain("must match the supplement product default unit");
   });
 
+  it("在庫ロットがある商品の既定単位は変更できない（migration 20260921000200）", async () => {
+    // ロット側のガードは INSERT / UPDATE でしか単位一致を見ないので、
+    // 商品側だけを変えると既存ロットと食い違う。FEFO 消費が単位の違う数量を
+    // 数値だけで減算しないよう、商品側の UPDATE にも同じ不変条件を張る。
+    const product = await asUser(async () => createProduct("unit_lock", "単位固定の検査"));
+
+    // ロットが無いうちは変えられる。
+    await asUser(async () =>
+      db.query("update public.supplement_products set default_unit = 'capsule' where id = $1", [
+        product,
+      ]),
+    );
+    const { rows: changed } = await db.query<{ default_unit: string }>(
+      "select default_unit from public.supplement_products where id = $1",
+      [product],
+    );
+    expect(changed[0]?.default_unit).toBe("capsule");
+
+    await insertLot(product, 10, 10, "capsule");
+
+    const message = await expectRejection(async () =>
+      asUser(async () =>
+        db.query("update public.supplement_products set default_unit = 'g' where id = $1", [
+          product,
+        ]),
+      ),
+    );
+    expect(message).toContain("default unit while inventory lots exist");
+
+    // 同じ単位を書き直すのは変更ではないので通る（全置換の保存が素通りできる）。
+    await asUser(async () =>
+      db.query("update public.supplement_products set default_unit = 'capsule' where id = $1", [
+        product,
+      ]),
+    );
+
+    // 単位以外の列はロットがあっても更新できる。
+    await asUser(async () =>
+      db.query("update public.supplement_products set name = '単位固定の検査2' where id = $1", [
+        product,
+      ]),
+    );
+
+    // 残量が尽きてもロット行は残るので、依然として単位は変えられない。
+    await asUser(async () =>
+      db.query(
+        "update public.supplement_inventory_lots set remaining_quantity = 0 where product_id = $1",
+        [product],
+      ),
+    );
+    const emptied = await expectRejection(async () =>
+      asUser(async () =>
+        db.query("update public.supplement_products set default_unit = 'g' where id = $1", [
+          product,
+        ]),
+      ),
+    );
+    expect(emptied).toContain("default unit while inventory lots exist");
+  });
+
   it("アーカイブ済み商品には新しいロット・予定を登録できない（既存行の訂正は可）", async () => {
     const archived = await asUser(async () =>
       createProduct("archived_probe", "アーカイブ検査", { archived: true }),

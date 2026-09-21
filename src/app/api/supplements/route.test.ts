@@ -570,6 +570,297 @@ describe("POST /api/supplements — 商品", () => {
     expect((await readError(response)).error.code).toBe("SUPPLEMENT_DUPLICATE_CONFLICT");
   });
 
+  /* ---------------------------------------------------------------- */
+  /* 409 の内訳（実装仕様書 6.4節 / docs/api/supplements.md 1.4節）   */
+  /* ---------------------------------------------------------------- */
+
+  it("版番号不一致の更新0件は 409 SUPPLEMENT_CONFLICT（重複競合ではない）", async () => {
+    // 一意制約違反は起きていない。単に WHERE row_version が一致しなかっただけ。
+    const fake = mockSupabase({
+      responses: { "update:supplement_products": [{ data: null, error: null }] },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "ビタミンC（改）",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_CONFLICT");
+
+    // 楽観ロックの UPDATE は確かに投げている（0件だった）。
+    const update = fake.operations.find((entry) => entry.kind === "update");
+    expect(update?.filters).toContainEqual({ op: "eq", column: "row_version", value: 1 });
+  });
+
+  it("更新での一意制約違反は 409 SUPPLEMENT_DUPLICATE_CONFLICT のまま", async () => {
+    mockSupabase({
+      responses: {
+        "update:supplement_products": [
+          { data: null, error: uniqueViolation("supplement_products_owner_name_key") },
+        ],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "旧・鉄", // 既存の別商品と同じ名前
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_DUPLICATE_CONFLICT");
+  });
+
+  it("409 SUPPLEMENT_CONFLICT のあと、products から id で引き直して再送すると通る", async () => {
+    // 1. 古い版番号で更新 → 0件 → SUPPLEMENT_CONFLICT。
+    mockSupabase({
+      responses: { "update:supplement_products": [{ data: null, error: null }] },
+    });
+
+    const conflicted = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "ビタミンC（改）",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+    expect(conflicted.status).toBe(409);
+    expect((await readError(conflicted)).error.code).toBe("SUPPLEMENT_CONFLICT");
+
+    // 2. 復帰分岐（1.8節「商品には対象特定クエリが要らない」）。
+    //    商品はどの GET の応答にも全件入るので、その中から id で探す。
+    mockSupabase({
+      responses: {
+        "select:supplement_products": [
+          { data: [productRow({ row_version: 7 }), productRows[1]], error: null },
+        ],
+      },
+    });
+    const listed = await GET(getRequest());
+    const listBody = supplementListResponseSchema.parse(await listed.json());
+    const current = listBody.data.products.find((entry) => entry.id === PRODUCT_ID);
+    expect(current?.rowVersion).toBe(7);
+
+    // 3. 取り直した rowVersion で再送すると成功する。
+    const fake = mockSupabase({
+      responses: {
+        "select:supplement_products": [
+          { data: [productRow({ row_version: 7 }), productRows[1]], error: null },
+        ],
+        "update:supplement_products": [{ data: productRow({ row_version: 8 }), error: null }],
+      },
+    });
+
+    const retried = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: current?.rowVersion,
+          name: "ビタミンC（改）",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+    expect(retried.status).toBe(200);
+
+    const body = saveSupplementResponseSchema.parse(await retried.json());
+    if (body.data.resource !== "product") {
+      throw new Error("unreachable");
+    }
+    expect(body.data.outcome).toBe("updated");
+    expect(body.data.product.rowVersion).toBe(8);
+
+    const update = fake.operations.find((entry) => entry.kind === "update");
+    expect(update?.filters).toContainEqual({ op: "eq", column: "row_version", value: 7 });
+  });
+
+  it("更新対象の商品が無いときも 409 SUPPLEMENT_CONFLICT（404 にしない）", async () => {
+    // 実装仕様書 6.4節: 行の不在と版番号違いを区別しない。
+    const fake = mockSupabase();
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: "9a2d3c4b-5a69-4788-9900-aabbccddeeff",
+          expectedRowVersion: 1,
+          name: "消えた商品",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_CONFLICT");
+    expect(fake.operations.some((entry) => entry.kind === "update")).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* defaultUnit は在庫の単位でもある（2.4節）                        */
+  /* ---------------------------------------------------------------- */
+
+  it("在庫ロットがある商品の defaultUnit 変更は 400 SUPPLEMENT_UNIT_MISMATCH", async () => {
+    const fake = mockSupabase({
+      responses: {
+        "select:supplement_inventory_lots": [{ data: [{ id: LOT_ID }], error: null }],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID, // 既定単位は tablet。ロットも tablet で数えている。
+          expectedRowVersion: 1,
+          name: "ビタミンC",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "g",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_UNIT_MISMATCH");
+
+    // 所有者スコープでロットの有無だけを見る（1件あれば十分）。
+    const lookup = fake.operations.find(
+      (entry) => entry.kind === "select" && entry.table === "supplement_inventory_lots",
+    );
+    expect(lookup?.filters).toStrictEqual([
+      { op: "eq", column: "owner_id", value: DEFAULT_USER_ID },
+      { op: "eq", column: "product_id", value: PRODUCT_ID },
+    ]);
+    expect(lookup?.limitValue).toBe(1);
+
+    // 拒否された以上、UPDATE は一切投げない。
+    expect(fake.operations.some((entry) => entry.kind === "update")).toBe(false);
+  });
+
+  it("在庫ロットがあっても defaultUnit が同じなら更新できる（ロットを引かない）", async () => {
+    const fake = mockSupabase({
+      responses: {
+        "select:supplement_inventory_lots": [{ data: [{ id: LOT_ID }], error: null }],
+        "update:supplement_products": [{ data: productRow({ row_version: 2 }), error: null }],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "ビタミンC 1000mg",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "tablet",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      fake.operations.some(
+        (entry) => entry.kind === "select" && entry.table === "supplement_inventory_lots",
+      ),
+    ).toBe(false);
+  });
+
+  it("在庫ロットが無ければ defaultUnit を変更できる", async () => {
+    const fake = mockSupabase({
+      responses: {
+        "select:supplement_inventory_lots": [{ data: [], error: null }],
+        "update:supplement_products": [
+          { data: productRow({ default_unit: "g", row_version: 2 }), error: null },
+        ],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "ビタミンC",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "g",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const update = fake.operations.find((entry) => entry.kind === "update");
+    expect(update?.values?.["default_unit"]).toBe("g");
+  });
+
+  it("DB 側のガードに当たった場合も 400 SUPPLEMENT_UNIT_MISMATCH へ写す", async () => {
+    // 事前検査をすり抜けた同時実行（ロット登録と単位変更が同時に走った）。
+    mockSupabase({
+      responses: {
+        "select:supplement_inventory_lots": [{ data: [], error: null }],
+        "update:supplement_products": [
+          {
+            data: null,
+            error: {
+              code: "23514",
+              message:
+                "cannot change the supplement product default unit while inventory lots exist",
+            },
+          },
+        ],
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "product",
+        product: {
+          id: PRODUCT_ID,
+          expectedRowVersion: 1,
+          name: "ビタミンC",
+          category: "vitamin",
+          form: "tablet",
+          defaultUnit: "g",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_UNIT_MISMATCH");
+  });
+
   it("適用済みの冪等キーは DB へ書かずに当時の行を返す", async () => {
     const fake = mockSupabase({
       responses: {
@@ -740,6 +1031,34 @@ describe("POST /api/supplements — 摂取予定", () => {
     // `HH:MM:SS` は契約の `HH:MM` へ丸める。
     expect(body.data.schedule.timeOfDay).toBe("08:00");
   });
+
+  it("更新対象の予定が消えているときは 409 SUPPLEMENT_CONFLICT（404 にしない）", async () => {
+    // 事前取得は archived_at を引き継ぐためのもので、契約（実装仕様書 6.4節）を
+    // 変えない。0件は版番号違いと区別せず 409。
+    const fake = mockSupabase({
+      responses: { "select:supplement_schedules": [{ data: null, error: null }] },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "schedule",
+        schedule: {
+          id: ENTRY_ID,
+          expectedRowVersion: 1,
+          productId: PRODUCT_ID,
+          scheduleKind: "daily",
+          timeOfDay: "08:00",
+          startDate: "2026-09-01",
+          amount: 2,
+          unit: "tablet",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_CONFLICT");
+    expect(fake.operations.some((entry) => entry.kind === "update")).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -793,6 +1112,28 @@ describe("POST /api/supplements — 在庫ロット", () => {
       }),
     );
     expect(response.status).toBe(400);
+  });
+
+  it("更新対象のロットが消えているときは 409 SUPPLEMENT_CONFLICT（404 にしない）", async () => {
+    const fake = mockSupabase({
+      responses: { "select:supplement_inventory_lots": [{ data: null, error: null }] },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "lot",
+        lot: {
+          id: LOT_ID,
+          expectedRowVersion: 1,
+          productId: PRODUCT_ID,
+          quantity: 60,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect((await readError(response)).error.code).toBe("SUPPLEMENT_CONFLICT");
+    expect(fake.operations.some((entry) => entry.kind === "update")).toBe(false);
   });
 });
 

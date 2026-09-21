@@ -8,7 +8,7 @@
 | 型・スキーマの正本       | [`src/features/supplements/schema.ts`](../../src/features/supplements/schema.ts)     |
 | 列挙値・在庫計算・FEFO順 | [`src/features/supplements/units.ts`](../../src/features/supplements/units.ts)       |
 | 409 後の対象特定ヘルパー | [`src/features/supplements/conflict.ts`](../../src/features/supplements/conflict.ts) |
-| DB スキーマ              | `supabase/migrations/20260915000100_supplements_core.sql` ほか3件                    |
+| DB スキーマ              | `supabase/migrations/20260915000100_supplements_core.sql` ほか5件                    |
 | 原子的RPC（FEFO・取消）  | `supabase/migrations/20260915000400_supplements_intake.sql`                          |
 | 共通のテーブル規約       | [`docs/database/table-conventions.md`](../database/table-conventions.md)             |
 | 同じ設計の先行実装       | [`docs/api/wellness.md`](./wellness.md)（睡眠・水分・体調。Phase 4-1a）              |
@@ -76,8 +76,15 @@ await fetch("/api/supplements", {
 - 応答の各行は `rowVersion` を持つ。
 - **商品・摂取予定・在庫ロットを更新するときは、直前に受け取った `rowVersion` を
   `expectedRowVersion` として必ず送る。** `id` を指定した更新で省略すると 400。
-- 版番号が違う／行が消えている場合は **409**。
-  行の不在と版番号違いは**区別されない**（他利用者の行の存在を漏らさないため）。
+- 版番号が違う／行が消えている場合は **409 `SUPPLEMENT_CONFLICT`**。
+  行の不在と版番号違いは**区別されない**（他利用者の行の存在を漏らさないため。
+  実装仕様書 6.4節「更新0件を競合（HTTP 409）として扱う」／
+  [`docs/database/table-conventions.md`](../database/table-conventions.md) 3.1節）。
+  商品・予定・ロットの保存はいずれも更新前に対象行を読むが（アーカイブ日時・残量を
+  据え置くため）、**その0件も 404 ではなく 409 で返す**。
+- 404 が返るのは**更新対象そのものではなく、入力が参照している別の行**が無いとき
+  だけ（`productId` → `SUPPLEMENT_PRODUCT_NOT_FOUND`、服用の `scheduleId` →
+  `SUPPLEMENT_NOT_FOUND`）。
 - 409 を受けたら **1.8節の対象特定クエリ**で最新の `rowVersion` を取り直して再試行する。
 - `rowVersion` はサーバーだけが進める。送っても保存には使われない（比較のみ）。
 
@@ -276,12 +283,12 @@ const outcome = interpretSupplementRefetch(strategy, data.entries);
 | `JSON_REQUIRED`                 | 415  | `Content-Type` が `application/json` でない                                                          | 実装バグ                                    |
 | `PAYLOAD_TOO_LARGE`             | 413  | ボディが 64 KiB 超                                                                                   | 入力を分割する                              |
 | `INVALID_REQUEST`               | 400  | JSON 不正／スキーマ不一致／未知フィールド／所有者IDの持ち込み／不正な `cursor`／在庫ロットの商品変更 | `message` をフォームエラーとして表示        |
-| `SUPPLEMENT_PRODUCT_NOT_FOUND`  | 404  | `productId` が所有者スコープに無い                                                                   | 商品一覧を取り直す                          |
+| `SUPPLEMENT_PRODUCT_NOT_FOUND`  | 404  | 入力が**参照する** `productId` が所有者スコープに無い（更新対象そのものではない）                    | 商品一覧を取り直す                          |
 | `SUPPLEMENT_PRODUCT_ARCHIVED`   | 400  | アーカイブ済み商品へ新規の予定・ロット・服用を登録しようとした                                       | アーカイブ解除を促す（2.3節）               |
-| `SUPPLEMENT_NOT_FOUND`          | 404  | 更新対象の予定・在庫ロットが所有者スコープに無い                                                     | 一覧を取り直す                              |
-| `SUPPLEMENT_UNIT_MISMATCH`      | 400  | ロットの単位が商品の既定単位と違う／服用の単位を換算できない                                         | **4.3節**。`consumeQuantity` の入力を促す   |
+| `SUPPLEMENT_NOT_FOUND`          | 404  | 服用記録が**参照する** `scheduleId` が所有者スコープに無い（またはその商品の予定でない）             | 予定一覧を取り直す                          |
+| `SUPPLEMENT_UNIT_MISMATCH`      | 400  | ロットの単位が商品の既定単位と違う／服用の単位を換算できない／**在庫ロットがある商品の単位を変えた** | **4.3節・2.4節**                            |
 | `SUPPLEMENT_INSUFFICIENT_STOCK` | 409  | **在庫が足りず FEFO 消費を完了できない**                                                             | **4.4節**。在庫の登録か消費量の見直しを促す |
-| `SUPPLEMENT_CONFLICT`           | 409  | 版番号不一致、または対象行が無い（更新・削除・取消）                                                 | 1.8節の手順で復帰する                       |
+| `SUPPLEMENT_CONFLICT`           | 409  | 版番号不一致、または**更新・削除・取消の対象行が無い**（1.4節）                                      | 1.8節の手順で復帰する                       |
 | `SUPPLEMENT_DUPLICATE_CONFLICT` | 409  | 商品名・商品キー・予定・ロット名の重複                                                               | 1.8節の後退手段で既存を探して編集へ倒す     |
 | `SUPPLEMENT_LOT_IN_USE`         | 409  | 服用に使われた在庫ロットを削除しようとした                                                           | **6節**。残量の調整（0 にする）を促す       |
 
@@ -380,10 +387,25 @@ const outcome = interpretSupplementRefetch(strategy, data.entries);
 在庫ロットの数量・残量・消費量は**すべて商品の `defaultUnit` で数える**。
 DB のトリガーがロットの単位を商品の単位に揃えることを強制する。
 
-そのため、**在庫ロットが1件でもある商品の `defaultUnit` を変えないこと**。
-変えると既存ロットの単位と食い違い、そのロットの更新が
-400 `SUPPLEMENT_UNIT_MISMATCH` で通らなくなる。
-（画面では、在庫があるときに単位のセレクトを無効化するのが親切。）
+そのため、**在庫ロットが1件でもある商品の `defaultUnit` は変更できない**。
+変更しようとすると 400 `SUPPLEMENT_UNIT_MISMATCH` で拒否される
+（残量 0 のロットも「1件」に数える。行は残り続けるため）。
+
+| 場面                                     | 結果                           |
+| ---------------------------------------- | ------------------------------ |
+| ロットが0件の商品の `defaultUnit` を変更 | 通る                           |
+| ロットが1件以上ある商品で**同じ**単位    | 通る（変更ではないため）       |
+| ロットが1件以上ある商品で**違う**単位    | 400 `SUPPLEMENT_UNIT_MISMATCH` |
+
+単位を変えたいときは、**先に在庫ロットを削除する**か、別の商品として登録し直して
+古い商品をアーカイブする。画面では、在庫があるときに単位のセレクトを無効化して
+このエラーに当てないのが親切。
+
+> **なぜ拒否するのか。** ロット側のトリガーはロットの INSERT / UPDATE でしか
+> 単位一致を見ないため、商品側だけを後から変えると素通りしてしまう。
+> 既存ロットが `tablet` のまま商品が `g` になると、そのあとの FEFO 消費が
+> 単位の違う数量を数値だけで減算する（`g` の服用で `tablet` のロットが減る）。
+> API 層の事前検査と migration `20260921000200` のトリガーの二重で止める。
 
 ### 2.5 `stock`（在庫の要約）
 
@@ -1037,11 +1059,11 @@ once は開始日、`as_needed` は 0回）に従ってサーバーが数える�
 
 | 種類                                    | 場所                                               |
 | --------------------------------------- | -------------------------------------------------- |
-| スキーマ契約・制約                      | `tests/db/supplements.test.ts`（33件）             |
+| スキーマ契約・制約                      | `tests/db/supplements.test.ts`（36件）             |
 | RLS 分離・SECURITY DEFINER の所有者検査 | `tests/db/supplements-rls.test.ts`（22件）         |
 | **FEFO 消費・負在庫拒否・取消復元**     | `tests/db/supplements-fefo.test.ts`（19件）        |
-| 冪等再送・409 からの復帰                | `tests/db/supplements-idempotency.test.ts`（14件） |
-| API 境界・分岐・応答                    | `src/app/api/supplements/route.test.ts`（46件）    |
+| 冪等再送・409 からの復帰                | `tests/db/supplements-idempotency.test.ts`（15件） |
+| API 境界・分岐・応答                    | `src/app/api/supplements/route.test.ts`（57件）    |
 | 契約スキーマ単体                        | `src/features/supplements/schema.test.ts`          |
 | 在庫計算・FEFO 並び順                   | `src/features/supplements/units.test.ts`           |
 

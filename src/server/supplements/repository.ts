@@ -152,6 +152,13 @@ function mapUnexpectedError(error: PostgrestError): Response {
         "在庫の単位は商品の既定単位と同じにしてください（在庫は商品の単位で数えます）。",
       );
     }
+    if (violates(error, "default unit while inventory lots exist")) {
+      // migration 20260921000200 の最終防衛線。API 側は保存前に同じ判定をするが、
+      // 「ロットの登録」と「単位の変更」が同時に走ると事前検査をすり抜ける。
+      return supplementUnitMismatch(
+        "在庫ロットがある商品の既定単位は変更できません。先に在庫ロットを削除するか、別の商品として登録してください。",
+      );
+    }
     if (violates(error, "used by a recorded intake and cannot be deleted")) {
       return supplementLotInUse();
     }
@@ -625,6 +632,52 @@ function resolveArchivedAt(
   return currentArchivedAt;
 }
 
+/**
+ * 在庫ロットが1件でもある商品の `defaultUnit` は変えられない
+ * （docs/api/supplements.md 2.4節）。
+ *
+ * 在庫の数量・残量・消費量は**すべて商品の既定単位で数える**。商品側の単位だけを
+ * 後から変えると、既存ロットは古い単位（例: `tablet`）のまま残り、FEFO 消費は
+ * 単位の違う数量を数値だけで引き算する——「g の服用で tablet のロットを減らす」
+ * という無意味な減算になる。
+ *
+ * ロット側のトリガー（migration 20260915000100 の `tg_supplement_lot_guard`）は
+ * ロットの INSERT / UPDATE でしか単位一致を見ないため、商品側の UPDATE は
+ * そこをすり抜ける。ここで先に拒否し、DB 側の最終防衛線は
+ * migration 20260921000200 の `tg_supplement_product_unit_guard` が担う。
+ *
+ * 残量 0 のロットも「存在する」に数える。残量が尽きても行は残り、その行の
+ * 更新（メモの訂正など）が単位不一致で通らなくなるため。
+ */
+async function ensureDefaultUnitIsChangeable(
+  supabase: SupabaseClient,
+  ownerId: string,
+  productId: string,
+): Promise<GuardResult<null>> {
+  const { data, error } = await supabase
+    .from(SUPPLEMENT_LOTS_TABLE)
+    .select("id")
+    .eq("owner_id", ownerId)
+    .eq("product_id", productId)
+    .limit(1);
+
+  if (error) {
+    return { ok: false, response: mapUnexpectedError(error) };
+  }
+
+  const rows = (data ?? []) as unknown as { id: string }[];
+  if (rows.length > 0) {
+    return {
+      ok: false,
+      response: supplementUnitMismatch(
+        "在庫ロットがある商品の既定単位は変更できません。先に在庫ロットを削除するか、別の商品として登録してください。",
+      ),
+    };
+  }
+
+  return { ok: true, value: null };
+}
+
 export async function saveProduct(
   supabase: SupabaseClient,
   ownerId: string,
@@ -671,9 +724,19 @@ export async function saveProduct(
   if (input.id !== undefined) {
     const existing = catalog.byId.get(input.id);
     if (existing === undefined) {
-      return { ok: false, response: supplementProductNotFound() };
+      // 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
+      // 更新対象が無い場合と版番号が古い場合を区別せず 409 にする
+      // （他利用者の行の存在有無を漏らさないため）。
+      return { ok: false, response: supplementConflict() };
     }
     currentArchivedAt = existing.archivedAt;
+
+    if (input.defaultUnit !== existing.defaultUnit) {
+      const changeable = await ensureDefaultUnitIsChangeable(supabase, ownerId, input.id);
+      if (!changeable.ok) {
+        return changeable;
+      }
+    }
   }
 
   const patch = {
@@ -712,7 +775,15 @@ export async function saveProduct(
       if (retry.value !== null) {
         return finish(retry.value, "idempotent_replay");
       }
-      if (error === null || error.code === PG_UNIQUE_VIOLATION) {
+      // 更新0件の理由を取り違えない（実装仕様書 6.4節）。
+      // `error === null` で0件なら WHERE 句が一致しなかった＝**楽観ロックの競合**で、
+      // 商品名・商品キーの重複ではない。ここを `SUPPLEMENT_DUPLICATE_CONFLICT` に
+      // すると、フロントは 1.8節の復帰手順（`id` で引き直して `rowVersion` を
+      // 取り直す）ではなく「既存を名前で探す」後退手段へ倒れてしまう。
+      if (error === null) {
+        return { ok: false, response: supplementConflict() };
+      }
+      if (error.code === PG_UNIQUE_VIOLATION) {
         return { ok: false, response: supplementDuplicateConflict() };
       }
       return { ok: false, response: mapUnexpectedError(error) };
@@ -746,8 +817,10 @@ export async function saveProduct(
     return { ok: false, response: mapUnexpectedError(error) };
   }
 
+  // 一意制約違反（23505）を伴わない0件は重複ではない。予定・ロットの作成と同じく
+  // 競合として扱う（実装仕様書 6.4節）。
   if (data === null) {
-    return { ok: false, response: supplementDuplicateConflict() };
+    return { ok: false, response: supplementConflict() };
   }
 
   return finish(data as unknown as SupplementProductRow, "created");
@@ -819,7 +892,9 @@ export async function saveSchedule(
       return existing;
     }
     if (existing.value === null) {
-      return { ok: false, response: supplementNotFound() };
+      // 実装仕様書 6.4節: 更新対象の不在と版番号違いを区別せず 409
+      // （事前取得は `archived_at` を引き継ぐためで、契約を変えるものではない）。
+      return { ok: false, response: supplementConflict() };
     }
     currentArchivedAt =
       existing.value.archived_at === null
@@ -995,7 +1070,9 @@ export async function saveLot(
       return existing;
     }
     if (existing.value === null) {
-      return { ok: false, response: supplementNotFound() };
+      // 実装仕様書 6.4節: 更新対象の不在と版番号違いを区別せず 409
+      // （事前取得は残量と商品の据え置きを見るためで、契約を変えるものではない）。
+      return { ok: false, response: supplementConflict() };
     }
     if (existing.value.product_id !== input.productId) {
       return {
