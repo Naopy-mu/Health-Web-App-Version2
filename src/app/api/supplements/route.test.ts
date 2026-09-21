@@ -965,6 +965,52 @@ describe("POST /api/supplements — 服用の記録と取消", () => {
     expect(call?.args).toMatchObject({ p_id: ENTRY_ID, p_expected_row_version: 1 });
   });
 
+  it("記録時の clientMutationId を取消へ使い回しても偽の replay にせず RPC を実行する", async () => {
+    const fake = mockSupabase({
+      responses: {
+        "select:supplement_mutation_log": [loggedMutation(intakeRow({ status: "taken" }))],
+      },
+      rpc: {
+        void_supplement_intake: {
+          data: {
+            outcome: "voided",
+            intake: intakeRow({
+              status: "voided",
+              voided_at: "2026-09-15T10:00:00+00:00",
+              row_version: 2,
+            }),
+          },
+          error: null,
+        },
+      },
+    });
+
+    const response = await POST(
+      postRequest({
+        resource: "void_intake",
+        clientMutationId: MUTATION_ID,
+        void: { id: ENTRY_ID, expectedRowVersion: 1 },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = saveSupplementResponseSchema.parse(await response.json());
+    if (body.data.resource !== "void_intake") {
+      throw new Error("unreachable");
+    }
+    expect(body.data.outcome).toBe("voided");
+    expect(body.data.intake.status).toBe("voided");
+    expect(fake.rpcArgs).toContainEqual({
+      name: "void_supplement_intake",
+      args: {
+        p_id: ENTRY_ID,
+        p_expected_row_version: 1,
+        p_reason: null,
+        p_client_mutation_id: MUTATION_ID,
+      },
+    });
+  });
+
   it("取消済みの再送は 200 idempotent_replay", async () => {
     mockSupabase({
       rpc: {

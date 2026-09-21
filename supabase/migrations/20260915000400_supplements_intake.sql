@@ -171,7 +171,7 @@ begin
     pg_catalog.hashtext(actor::text)
   );
 
-  -- 業務キーによる引き当て（docs/api/supplements.md 1.5節）。
+  -- 業務キーによる引き当て（docs/api/supplements.md 1.6節）。
   -- 既に記録済みなら在庫へ一切触れず、当時の行をそのまま返す。
   select l.* into existing
   from public.supplement_intake_logs l

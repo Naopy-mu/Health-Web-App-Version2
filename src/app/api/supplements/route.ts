@@ -79,7 +79,7 @@ export async function GET(request: NextRequest): Promise<Response> {
 
   // 商品は**どの応答にも全件入る**（記録・予定・ロットのラベル解決に要るため）。
   // 409 のあとの商品の対象特定もここから `id` で引けばよく、追加の取得は要らない
-  // （docs/api/supplements.md 1.7節）。
+  // （docs/api/supplements.md 1.8節）。
   const common = {
     products: catalog.value.all,
     summary: summary.value,
@@ -91,7 +91,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     nextCursor,
   });
 
-  // `id` を指定した取得は主キーの1件取得（docs/api/supplements.md 1.7節）。
+  // `id` を指定した取得は主キーの1件取得（docs/api/supplements.md 1.8節）。
   // 一覧の `limit` にも日時・商品の絞り込みにも依存しないので、409 のあとに
   // 対象行を必ず特定できる。0件は「本当に存在しない」を意味する。
   if (query.value.resource === "schedule") {

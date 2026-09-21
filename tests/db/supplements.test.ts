@@ -558,6 +558,100 @@ describe("サプリメントのスキーマ (実装仕様書 5.6節)", () => {
   });
 
   /* ------------------------------------------------------------------ */
+  /* 集計（ローカル日境界・アーカイブ方針）                              */
+  /* ------------------------------------------------------------------ */
+
+  it("週の服用数は予定数と同じ7ローカル日（Asia/Tokyo）で数える", async () => {
+    const summaryUser = await signUp(db, "supplements-summary-week@example.test");
+
+    const summary = await asAuthenticated(db, summaryUser, async () => {
+      const product = await db.query<{ id: string }>(
+        `insert into public.supplement_products
+           (owner_id, product_key, name, category, form, default_amount, default_unit)
+         values ($1, 'summary_week', '週集計検査', 'other', 'tablet', 1, 'tablet')
+         returning id`,
+        [summaryUser],
+      );
+      const summaryProductId = product.rows[0]?.id;
+      await db.query(
+        `insert into public.supplement_inventory_lots
+           (owner_id, product_id, quantity, remaining_quantity, unit)
+         values ($1, $2, 10, 10, 'tablet')`,
+        [summaryUser, summaryProductId],
+      );
+
+      // 基準は 2026-09-15 21:00 JST。週の窓は 9/9 00:00 以上、9/16 00:00 未満。
+      // 1件目はローリング168時間には入るが、ローカル日では前日なので除外される。
+      for (const [recordedAt, key] of [
+        ["2026-09-08T14:59:59Z", "summary-before-local-boundary"],
+        ["2026-09-08T15:00:00Z", "summary-on-local-boundary"],
+        ["2026-09-15T15:00:00Z", "summary-on-upper-boundary"],
+      ] as const) {
+        await db.query(
+          `select public.record_supplement_intake(
+             p_product_id => $1,
+             p_idempotency_key => $2,
+             p_recorded_at => $3::timestamptz,
+             p_amount => 1
+           )`,
+          [summaryProductId, key, recordedAt],
+        );
+      }
+
+      return db.query<{ weekly_taken_count: string }>(
+        `select weekly_taken_count::text
+           from public.supplement_summary(
+             p_reference => timestamptz '2026-09-15T12:00:00Z',
+             p_timezone => 'Asia/Tokyo'
+           )`,
+      );
+    });
+
+    expect(summary.rows[0]?.weekly_taken_count).toBe("1");
+  });
+
+  it("期限接近ロット数は低在庫商品数と同様にアーカイブ済み商品を除外する", async () => {
+    const summaryUser = await signUp(db, "supplements-summary-archive@example.test");
+
+    const summary = await asAuthenticated(db, summaryUser, async () => {
+      const products = await db.query<{ id: string; product_key: string }>(
+        `insert into public.supplement_products
+           (owner_id, product_key, name, category, form, default_unit)
+         values
+           ($1, 'summary_active', '有効商品', 'other', 'tablet', 'tablet'),
+           ($1, 'summary_archived', 'アーカイブ商品', 'other', 'tablet', 'tablet')
+         returning id, product_key`,
+        [summaryUser],
+      );
+      const activeId = products.rows.find((row) => row.product_key === "summary_active")?.id;
+      const archivedId = products.rows.find((row) => row.product_key === "summary_archived")?.id;
+
+      await db.query(
+        `insert into public.supplement_inventory_lots
+           (owner_id, product_id, quantity, remaining_quantity, unit, expires_on)
+         values
+           ($1, $2, 5, 5, 'tablet', date '2026-09-20'),
+           ($1, $3, 5, 5, 'tablet', date '2026-09-20')`,
+        [summaryUser, activeId, archivedId],
+      );
+      await db.query("update public.supplement_products set archived_at = now() where id = $1", [
+        archivedId,
+      ]);
+
+      return db.query<{ expiring_lot_count: string }>(
+        `select expiring_lot_count::text
+           from public.supplement_summary(
+             p_reference => timestamptz '2026-09-15T12:00:00Z',
+             p_timezone => 'Asia/Tokyo',
+             p_expiring_within_days => 30
+           )`,
+      );
+    });
+
+    expect(summary.rows[0]?.expiring_lot_count).toBe("1");
+  });
+
+  /* ------------------------------------------------------------------ */
   /* 服用記録・在庫の動きの偽装防止（実装仕様書 9.2節）                  */
   /* ------------------------------------------------------------------ */
 

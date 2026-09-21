@@ -34,7 +34,7 @@ import { createPglitePostgrest } from "./supabase-pglite";
  * > 409 は、実際に異なる内容での競合時のみ発生させる。（実装仕様書 5.3節。
  * > 全機能に共通の契約）
  *
- * サプリメントには**2種類の冪等キー**がある（docs/api/supplements.md 1.5節）。
+ * サプリメントには**2種類の冪等キー**がある（docs/api/supplements.md 1.6節）。
  *   - `idempotencyKey`（8〜200文字）: 服用固有の業務キー。二重の在庫消費を防ぐ
  *   - `clientMutationId`（UUID）: 共通のオフライン再送キー。履歴は
  *     `supplement_mutation_log` に残り、**何世代前の再送でも**同じ応答を返す
@@ -443,6 +443,47 @@ describe("サプリメントの冪等再送と 409 からの復帰 (実装仕様
     expect(replayVoid.outcome).toBe("idempotent_replay");
     expect(replayVoid.intake.status).toBe("voided");
     expect(replayVoid.intake.rowVersion).toBe(voided.intake.rowVersion);
+  });
+
+  it("服用: 記録時の clientMutationId を取消へ使い回しても実際に取消・在庫復元する", async () => {
+    const reusedKey = cmid();
+    const before = (await reload()).byId.get(productId)?.stock.remainingTotal ?? 0;
+    const saved = await expectOk(
+      await recordIntake(
+        supabase,
+        userId,
+        {
+          productId,
+          idempotencyKey: intakeKey(),
+          recordedAt: "2026-09-15T12:30:00.000Z",
+          amount: 2,
+        },
+        reusedKey,
+        catalog,
+      ),
+    );
+    expect(saved.stock.remainingTotal).toBe(before - 2);
+
+    const voided = await expectOk(
+      await voidIntake(
+        supabase,
+        userId,
+        { id: saved.intake.id, expectedRowVersion: saved.intake.rowVersion },
+        reusedKey,
+        catalog,
+      ),
+    );
+
+    expect(voided.outcome).toBe("voided");
+    expect(voided.intake.status).toBe("voided");
+    expect(voided.intake.rowVersion).toBe(saved.intake.rowVersion + 1);
+    expect(voided.stock.remainingTotal).toBe(before);
+
+    const stored = await db.query<{ status: string }>(
+      "select status from public.supplement_intake_logs where id = $1",
+      [saved.intake.id],
+    );
+    expect(stored.rows[0]?.status).toBe("voided");
   });
 
   it("服用: 版番号が進んだあとの取消は 409（冪等キーを伴わない再試行）", async () => {

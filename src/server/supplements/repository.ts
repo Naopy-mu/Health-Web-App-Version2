@@ -426,7 +426,7 @@ function paginate<T extends { id: string }>(
 }
 
 /**
- * 主キーによる1件取得（実装仕様書 6.4節 / docs/api/supplements.md 1.7節）。
+ * 主キーによる1件取得（実装仕様書 6.4節 / docs/api/supplements.md 1.8節）。
  *
  * **409 のあとに対象行を特定する第一手段**。一覧の `limit` にも、日時・商品に
  * よる絞り込みにも一切依存しない。
@@ -1184,7 +1184,7 @@ export async function recordIntake(
  *
  * 取消と、消費した在庫のロットへの正確な復元を
  * **`void_supplement_intake` RPC が1トランザクションで**行う。
- * 対象は主キーで直接特定する（docs/api/supplements.md 1.7節）。
+ * 対象は主キーで直接特定する（docs/api/supplements.md 1.8節）。
  * 既に取消済みの記録への再送は 409 ではなく `idempotent_replay`。
  */
 export async function voidIntake(
@@ -1231,7 +1231,11 @@ export async function voidIntake(
     if (!snapshot.ok) {
       return snapshot;
     }
-    if (snapshot.value !== null) {
+    // 記録と取消は mutation log 上で同じ resource を共有する。記録時のキーを
+    // 誤って取消へ使い回した場合、そのスナップショットは status=taken なので
+    // 取消の replay ではない。voided の結果だけを早期 replay として採用し、
+    // それ以外は RPC に通して実際に在庫を復元する。
+    if (snapshot.value?.status === "voided") {
       return finish(snapshot.value, "idempotent_replay");
     }
   }

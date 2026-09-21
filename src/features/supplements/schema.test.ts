@@ -413,7 +413,7 @@ describe("リクエスト全体（実装仕様書 7章）", () => {
   });
 });
 
-describe("GET のクエリ（実装仕様書 7章 / docs/api/supplements.md 1.7節）", () => {
+describe("GET のクエリ（実装仕様書 7章 / docs/api/supplements.md 1.8節）", () => {
   it("既定は intake / desc / 100件", () => {
     const parsed = supplementListQuerySchema.parse({});
     expect(parsed).toMatchObject({ resource: "intake", order: "desc", limit: 100 });
@@ -458,7 +458,7 @@ describe("GET のクエリ（実装仕様書 7章 / docs/api/supplements.md 1.7�
   });
 });
 
-describe("409 後の対象特定（docs/api/supplements.md 1.7節）", () => {
+describe("409 後の対象特定（docs/api/supplements.md 1.8節）", () => {
   it("id があれば必ず主キーの1件取得を選ぶ", () => {
     const query = buildSupplementRefetchQuery({
       resource: "schedule",

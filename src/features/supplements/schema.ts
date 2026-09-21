@@ -73,7 +73,7 @@ export const clientMutationIdSchema = z.uuid();
  * 実装仕様書 5.6節「冪等キー（8〜200文字）」。
  *
  * 服用記録**固有**のキーで、`clientMutationId`（UUID）とは別物
- * （docs/api/supplements.md 1.5節）。「この1回の服用」を所有者ごとに一意にし、
+ * （docs/api/supplements.md 1.6節）。「この1回の服用」を所有者ごとに一意にし、
  * 同じ服用が二重に在庫を減らすのを防ぐ。
  */
 export const supplementIdempotencyKeySchema = z
@@ -341,7 +341,7 @@ export type SupplementSummary = z.infer<typeof supplementSummarySchema>;
  * ページングする一覧リソース。1回の GET で1つだけ取る。
  *
  * 商品（`products`）は**どの応答にも全件入る**ので、ここには含めない
- * （睡眠・水分・体調の種別・目標と同じ扱い。docs/api/supplements.md 1.7節）。
+ * （睡眠・水分・体調の種別・目標と同じ扱い。docs/api/supplements.md 1.8節）。
  */
 export const SUPPLEMENT_LIST_RESOURCES = ["schedule", "lot", "intake", "movement"] as const;
 export const supplementListResourceSchema = z.enum(SUPPLEMENT_LIST_RESOURCES);
