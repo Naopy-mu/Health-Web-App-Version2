@@ -68,6 +68,22 @@ export const API_ERROR_CODES = {
   WELLNESS_GOAL_CONFLICT: "WELLNESS_GOAL_CONFLICT",
   /** 409: 飲み物・症状種別の項目キー重複、または版番号不一致（実装仕様書 5.5節）。 */
   WELLNESS_TYPE_CONFLICT: "WELLNESS_TYPE_CONFLICT",
+  /** 404: サプリメント商品が所有者スコープに見つからない（実装仕様書 5.6節）。 */
+  SUPPLEMENT_PRODUCT_NOT_FOUND: "SUPPLEMENT_PRODUCT_NOT_FOUND",
+  /** 400: アーカイブ済みの商品へ新規の予定・ロット・服用を登録しようとした（5.6節）。 */
+  SUPPLEMENT_PRODUCT_ARCHIVED: "SUPPLEMENT_PRODUCT_ARCHIVED",
+  /** 404: 摂取予定・在庫ロットが所有者スコープに見つからない（実装仕様書 5.6節）。 */
+  SUPPLEMENT_NOT_FOUND: "SUPPLEMENT_NOT_FOUND",
+  /** 400: 在庫ロットの単位が商品の既定単位と違う、または服用の単位を換算できない（5.6節）。 */
+  SUPPLEMENT_UNIT_MISMATCH: "SUPPLEMENT_UNIT_MISMATCH",
+  /** 409: 在庫が足りず FEFO 消費を完了できない（実装仕様書 5.6節）。 */
+  SUPPLEMENT_INSUFFICIENT_STOCK: "SUPPLEMENT_INSUFFICIENT_STOCK",
+  /** 409: サプリメントの行の版番号不一致、または対象が存在しない（実装仕様書 6.4節）。 */
+  SUPPLEMENT_CONFLICT: "SUPPLEMENT_CONFLICT",
+  /** 409: 商品名・商品キー・予定・ロット名の重複登録（実装仕様書 5.6節）。 */
+  SUPPLEMENT_DUPLICATE_CONFLICT: "SUPPLEMENT_DUPLICATE_CONFLICT",
+  /** 409: 服用に使われた在庫ロットを削除しようとした（実装仕様書 5.6節）。 */
+  SUPPLEMENT_LOT_IN_USE: "SUPPLEMENT_LOT_IN_USE",
   /** 413: リクエストボディが64KiBを超えた（実装仕様書 7章）。 */
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   /** 501: 後続フェーズで実装する骨格（実装仕様書 5.1節の削除フロー）。 */
@@ -280,5 +296,74 @@ export const wellnessTypeConflict = () =>
   apiError(
     API_ERROR_CODES.WELLNESS_TYPE_CONFLICT,
     "種別を保存できませんでした。同じ項目キーの種別が既にあるか、他の操作で更新されています。",
+    409,
+  );
+
+/* サプリメント（実装仕様書 5.6節）。詳細は docs/api/supplements.md のエラーコード一覧。 */
+
+export const supplementProductNotFound = () =>
+  apiError(API_ERROR_CODES.SUPPLEMENT_PRODUCT_NOT_FOUND, "サプリメント商品が見つかりません。", 404);
+
+/**
+ * 実装仕様書 5.6節（5.3節・5.5節の方針を踏襲）:
+ * アーカイブ済みの商品へ新規の予定・在庫ロット・服用記録を登録することは拒否する。
+ * 既存行の訂正は妨げない。
+ */
+export const supplementProductArchived = () =>
+  apiError(
+    API_ERROR_CODES.SUPPLEMENT_PRODUCT_ARCHIVED,
+    "アーカイブ済みの商品には新しく登録できません。アーカイブを解除してからお試しください。",
+    400,
+  );
+
+export const supplementNotFound = () =>
+  apiError(API_ERROR_CODES.SUPPLEMENT_NOT_FOUND, "対象の予定または在庫が見つかりません。", 404);
+
+/**
+ * 在庫は商品の既定単位で数える（実装仕様書 5.6節）。単位が揃わないまま
+ * 消費すると「mg のロットから錠数を引く」ような無意味な減算になるため、
+ * 換算はアプリ側の責任として明示させる。
+ */
+export const supplementUnitMismatch = (message: string) =>
+  apiError(API_ERROR_CODES.SUPPLEMENT_UNIT_MISMATCH, message, 400);
+
+/**
+ * 実装仕様書 5.6節:
+ * > 負在庫となる操作は原子的RPC（`record_supplement_intake` /
+ * > `void_supplement_intake`）が拒否する。
+ *
+ * 409 にするのは、これが「入力の誤り」ではなく**状態の競合**だから。
+ * 在庫を補充する（ロットを登録する）か消費量を減らせば同じ要求が通る。
+ */
+export const supplementInsufficientStock = () =>
+  apiError(
+    API_ERROR_CODES.SUPPLEMENT_INSUFFICIENT_STOCK,
+    "在庫が足りないため記録できませんでした。在庫を登録するか、消費量を見直してください。",
+    409,
+  );
+
+/**
+ * 実装仕様書 6.4節 / docs/database/table-conventions.md 3.1節:
+ * 「行が存在しない場合と版番号が古い場合を区別せず 409 にする」。
+ * 他利用者の行の存在有無を漏らさないため、文言でも区別しない。
+ */
+export const supplementConflict = () =>
+  apiError(
+    API_ERROR_CODES.SUPPLEMENT_CONFLICT,
+    "内容が他の操作で更新されています。最新の内容を取得してからやり直してください。",
+    409,
+  );
+
+export const supplementDuplicateConflict = () =>
+  apiError(
+    API_ERROR_CODES.SUPPLEMENT_DUPLICATE_CONFLICT,
+    "保存できませんでした。同じ内容が既に登録されているか、他の操作で更新されています。",
+    409,
+  );
+
+export const supplementLotInUse = () =>
+  apiError(
+    API_ERROR_CODES.SUPPLEMENT_LOT_IN_USE,
+    "このロットは服用の記録に使われているため削除できません。残量の調整をご利用ください。",
     409,
   );
