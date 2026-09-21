@@ -8,7 +8,7 @@
 | 型・スキーマの正本       | [`src/features/supplements/schema.ts`](../../src/features/supplements/schema.ts)     |
 | 列挙値・在庫計算・FEFO順 | [`src/features/supplements/units.ts`](../../src/features/supplements/units.ts)       |
 | 409 後の対象特定ヘルパー | [`src/features/supplements/conflict.ts`](../../src/features/supplements/conflict.ts) |
-| DB スキーマ              | `supabase/migrations/20260915000100_supplements_core.sql` ほか5件                    |
+| DB スキーマ              | `supabase/migrations/20260915000100_supplements_core.sql` ほか6件                    |
 | 原子的RPC（FEFO・取消）  | `supabase/migrations/20260915000400_supplements_intake.sql`                          |
 | 共通のテーブル規約       | [`docs/database/table-conventions.md`](../database/table-conventions.md)             |
 | 同じ設計の先行実装       | [`docs/api/wellness.md`](./wellness.md)（睡眠・水分・体調。Phase 4-1a）              |
@@ -406,6 +406,14 @@ DB のトリガーがロットの単位を商品の単位に揃えることを�
 > 既存ロットが `tablet` のまま商品が `g` になると、そのあとの FEFO 消費が
 > 単位の違う数量を数値だけで減算する（`g` の服用で `tablet` のロットが減る）。
 > API 層の事前検査と migration `20260921000200` のトリガーの二重で止める。
+>
+> **同時実行でも崩れない。** 「単位の変更」と「同じ商品へのロット登録」が同時に
+> 届くと、どちらの検査も相手の未コミットの変更を見られず両方が通りうる。
+> migration `20260921000300` が両側のトリガーで**商品単位の advisory lock** を取って
+> 直列化するので、後から確定した側が必ず拒否される（単位変更が先ならロット登録が
+> 400 `SUPPLEMENT_UNIT_MISMATCH`、ロット登録が先なら単位変更が同じく 400）。
+> 待たされるのは同じ商品への単位変更とロット登録どうしだけで、服用の記録や
+> 別の商品へのロット登録は待たされない。
 
 ### 2.5 `stock`（在庫の要約）
 
@@ -1059,13 +1067,17 @@ once は開始日、`as_needed` は 0回）に従ってサーバーが数える�
 
 | 種類                                    | 場所                                               |
 | --------------------------------------- | -------------------------------------------------- |
-| スキーマ契約・制約                      | `tests/db/supplements.test.ts`（36件）             |
+| スキーマ契約・制約                      | `tests/db/supplements.test.ts`（37件）             |
 | RLS 分離・SECURITY DEFINER の所有者検査 | `tests/db/supplements-rls.test.ts`（22件）         |
 | **FEFO 消費・負在庫拒否・取消復元**     | `tests/db/supplements-fefo.test.ts`（19件）        |
 | 冪等再送・409 からの復帰                | `tests/db/supplements-idempotency.test.ts`（15件） |
+| 単位変更とロット作成の同時実行（実 PG） | `tests/db/supplements-unit-race.pg.test.ts`（4件） |
 | API 境界・分岐・応答                    | `src/app/api/supplements/route.test.ts`（57件）    |
 | 契約スキーマ単体                        | `src/features/supplements/schema.test.ts`          |
 | 在庫計算・FEFO 並び順                   | `src/features/supplements/units.test.ts`           |
 
 DB のテストは PGlite に全 migration を新規適用した実データベースへ、実リポジトリを
 そのまま通して実行している（モックの台本ではない）。
+PGlite は接続が1本で本当の並行実行を再現できないため、同時実行の不変条件は
+`supplements-unit-race.pg.test.ts` が Docker 上の実 PostgreSQL で独立した2本の
+セッションを競合させて確かめる（CI でも実行。手順は `tests/README.md`）。

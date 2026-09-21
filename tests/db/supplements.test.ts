@@ -513,6 +513,86 @@ describe("サプリメントのスキーマ (実装仕様書 5.6節)", () => {
     expect(emptied).toContain("default unit while inventory lots exist");
   });
 
+  it("単位変更とロット作成は商品単位の advisory lock で直列化される（migration 20260921000300）", async () => {
+    // 両側のトリガーは相手のテーブルを読んで検査するが、READ COMMITTED では
+    // 相手の未コミットの変更が見えない。単位変更とロット作成が同時に走ると
+    // 両方が検査を通り、商品 = g / ロット = tablet が残りうる。
+    //
+    // PGlite は接続が1本で本当の並行実行を再現できないため、ここでは直列化の
+    // 前提になる**ロックが実際に取られていること**を実トランザクションの中から
+    // 確かめる。2本の接続での競合そのものは、実 PostgreSQL で
+    // tests/db/supplements-unit-race.pg.test.ts が確かめる。
+    const product = await asUser(async () => createProduct("unit_race_probe", "直列化の検査"));
+    const other = await asUser(async () => createProduct("unit_race_other", "直列化の検査（別）"));
+
+    /** 商品IDから導いたキーのアドバイザリロックが、今このセッションで有効か。 */
+    const productLockHeld = async (id: string): Promise<number> => {
+      const { rows } = await db.query<{ held: number }>(
+        `select count(*)::int as held
+           from pg_locks
+          where locktype = 'advisory'
+            and granted
+            and classid = pg_catalog.hashtext('supplement_product_unit')::oid
+            and objid = pg_catalog.hashtext($1)::oid
+            and objsubid = 2`,
+        [id],
+      );
+      return rows[0]?.held ?? 0;
+    };
+
+    /** 認証済み利用者の明示トランザクションの中で走らせ、必ず巻き戻す。 */
+    const probe = async <T>(run: () => Promise<T>): Promise<T> => {
+      await db.exec("begin;");
+      await db.query("select set_config('request.jwt.claims', $1, true)", [
+        JSON.stringify({ sub: userId, role: "authenticated" }),
+      ]);
+      await db.exec("set local role authenticated;");
+      try {
+        return await run();
+      } finally {
+        await db.exec("rollback;");
+      }
+    };
+
+    // 1. 単位変更: ロットの有無を数える前に、その商品のロックを取る。
+    const onUnitChange = await probe(async () => {
+      await db.query("update public.supplement_products set default_unit = 'g' where id = $1", [
+        product,
+      ]);
+      return { own: await productLockHeld(product), other: await productLockHeld(other) };
+    });
+    expect(onUnitChange).toEqual({ own: 1, other: 0 });
+
+    // 2. ロット作成: 商品の単位を読む前に、同じキーのロックを取る。
+    const onLotInsert = await probe(async () => {
+      await db.query(
+        `insert into public.supplement_inventory_lots
+           (owner_id, product_id, quantity, remaining_quantity, unit)
+         values ($1, $2, 10, 10, 'tablet')`,
+        [userId, product],
+      );
+      return { own: await productLockHeld(product), other: await productLockHeld(other) };
+    });
+    expect(onLotInsert).toEqual({ own: 1, other: 0 });
+
+    // 3. 直列化の要らない操作では取らない（服用の FEFO 消費や名称変更を待たせない）。
+    await insertLot(other, 10, 10, "tablet");
+    const onUnrelated = await probe(async () => {
+      await db.query("update public.supplement_products set name = '直列化の検査2' where id = $1", [
+        product,
+      ]);
+      await db.query(
+        "update public.supplement_inventory_lots set remaining_quantity = 5 where product_id = $1",
+        [other],
+      );
+      return { own: await productLockHeld(product), other: await productLockHeld(other) };
+    });
+    expect(onUnrelated).toEqual({ own: 0, other: 0 });
+
+    // 4. トランザクション単位のロックなので、終了時に自動で解放される。
+    expect(await productLockHeld(product)).toBe(0);
+  });
+
   it("アーカイブ済み商品には新しいロット・予定を登録できない（既存行の訂正は可）", async () => {
     const archived = await asUser(async () =>
       createProduct("archived_probe", "アーカイブ検査", { archived: true }),

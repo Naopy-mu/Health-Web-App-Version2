@@ -20,6 +20,17 @@ jobs:
       - run: npm run lint
       - run: npm run format
       - run: npm test
+      # PGlite では再現できない同時実行（2本の接続の競合）を実 PostgreSQL で確かめる
+      # （tests/README.md「実 PostgreSQL での同時実行テスト」）。
+      - name: Start PostgreSQL for concurrency tests
+        run: |
+          docker run -d --name race-pg -e POSTGRES_PASSWORD=race postgres:17-alpine
+          # 初期化中の一時サーバーに繋がないよう、初期化の完了を待ってから疎通を確かめる。
+          timeout 60 sh -c 'until docker logs race-pg 2>&1 | grep -q "PostgreSQL init process complete"; do sleep 1; done'
+          timeout 60 sh -c 'until docker exec race-pg pg_isready -U postgres; do sleep 1; done'
+      - run: npx vitest run tests/db/supplements-unit-race.pg.test.ts
+        env:
+          RACE_PG_CONTAINER: race-pg
       - run: npm run build
       - run: npm run env:check
       # 本番依存に脆弱性が1件でもあれば非ゼロ終了し、CI を失敗させる。
