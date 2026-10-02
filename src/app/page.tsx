@@ -4,7 +4,7 @@ export default function HomePage() {
   return (
     <main id="main-content">
       <h1>Health Web App</h1>
-      <p>Phase 4-1b: 睡眠・水分・体調のフロントエンドを実装しました。</p>
+      <p>Phase 4-2b: サプリメントのフロントエンドを実装しました。</p>
       <nav aria-label="記録画面へのリンク">
         <ul>
           <li>
@@ -18,6 +18,9 @@ export default function HomePage() {
           </li>
           <li>
             <Link href="/condition">体調</Link>
+          </li>
+          <li>
+            <Link href="/supplements">サプリメント</Link>
           </li>
         </ul>
       </nav>
