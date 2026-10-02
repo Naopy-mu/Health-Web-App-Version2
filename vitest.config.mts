@@ -20,5 +20,7 @@ export default defineConfig({
     include: ["src/**/*.test.ts", "src/**/*.test.tsx", "tests/**/*.test.ts"],
     exclude: ["node_modules/**", ".next/**", "e2e/**", "staging-e2e/**"],
     globals: false,
+    hookTimeout: 180_000,
+    maxWorkers: 4,
   },
 });
