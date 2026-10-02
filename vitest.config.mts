@@ -21,6 +21,6 @@ export default defineConfig({
     exclude: ["node_modules/**", ".next/**", "e2e/**", "staging-e2e/**"],
     globals: false,
     hookTimeout: 180_000,
-    maxWorkers: 4,
+    maxWorkers: "50%",
   },
 });
