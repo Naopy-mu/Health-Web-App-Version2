@@ -11,12 +11,7 @@ import {
 } from "../units";
 import { planFefoConsumption } from "../units";
 import { unitLabel } from "../labels";
-import {
-  buildAdhocIntakeIdempotencyKey,
-  buildScheduledIntakeIdempotencyKey,
-  productById,
-  toDateTimeLocalValue,
-} from "../utils";
+import { buildAdhocIntakeIdempotencyKey, productById, toDateTimeLocalValue } from "../utils";
 import styles from "./supplements.module.css";
 
 export type IntakeFormOccurrence = {
@@ -25,6 +20,7 @@ export type IntakeFormOccurrence = {
   productId: string;
   amount: number;
   unit: SupplementUnit;
+  idempotencyKey: string;
 };
 
 type IntakeFormData = {
@@ -68,7 +64,8 @@ type IntakeFormProps = {
     scheduledFor: string | null;
     consumeQuantity: number | undefined;
     note: string | null;
-  }) => void;
+  }) => Promise<void> | void;
+  onSuccess?: () => void;
   onCancel?: () => void;
   disabled: boolean;
   serverError: string | null;
@@ -79,6 +76,7 @@ export function IntakeForm({
   lots,
   occurrence,
   onSubmit,
+  onSuccess,
   onCancel,
   disabled,
   serverError,
@@ -87,6 +85,7 @@ export function IntakeForm({
     emptyForm(products.find((p) => p.archivedAt === null)?.id ?? ""),
   );
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof IntakeFormData, string>>>({});
+  const [adhocRetryCount, setAdhocRetryCount] = useState(0);
 
   const productId = useId();
   const statusId = useId();
@@ -122,28 +121,46 @@ export function IntakeForm({
         note: "",
       });
     } else {
+      setAdhocRetryCount(0);
       setForm(emptyForm(products.find((p) => p.archivedAt === null)?.id ?? ""));
     }
     setFieldErrors({});
   }, [occurrence, products]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (!occurrence && selectedProduct) {
-      setForm((prev) => {
-        if (prev.productId !== selectedProduct.id) {
-          return prev;
-        }
-        const nextAmount =
-          prev.amount === "" && selectedProduct.defaultAmount !== null
-            ? String(selectedProduct.defaultAmount)
-            : prev.amount;
-        const nextUnit =
-          prev.productId === selectedProduct.id ? prev.unit : selectedProduct.defaultUnit;
-        return { ...prev, amount: nextAmount, unit: nextUnit };
-      });
+    if (form.productId) {
+      return;
     }
+    const firstActive = products.find((p) => p.archivedAt === null);
+    const defaultProductId = firstActive?.id ?? products[0]?.id ?? "";
+    if (!defaultProductId) {
+      return;
+    }
+    setForm((prev) => ({
+      ...prev,
+      productId: defaultProductId,
+      unit: firstActive?.defaultUnit ?? prev.unit,
+      amount:
+        prev.amount === "" && firstActive && firstActive.defaultAmount !== null
+          ? String(firstActive.defaultAmount)
+          : prev.amount,
+    }));
+  }, [products, form.productId]);
+
+  useEffect(() => {
+    if (occurrence || !selectedProduct) {
+      return;
+    }
+    setForm((prev) => {
+      if (prev.productId !== selectedProduct.id) {
+        return prev;
+      }
+      const nextAmount =
+        prev.amount === "" && selectedProduct.defaultAmount !== null
+          ? String(selectedProduct.defaultAmount)
+          : prev.amount;
+      return { ...prev, amount: nextAmount, unit: selectedProduct.defaultUnit };
+    });
   }, [selectedProduct, occurrence]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -223,7 +240,7 @@ export function IntakeForm({
     return Object.keys(errors).length === 0;
   };
 
-  const handleSubmit = (event: React.FormEvent) => {
+  const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!validate() || !selectedProduct) {
       return;
@@ -231,10 +248,10 @@ export function IntakeForm({
 
     const recordedAt = new Date(form.recordedAt).toISOString();
     let idempotencyKey: string;
-    if (form.scheduleId && form.scheduledFor) {
-      idempotencyKey = buildScheduledIntakeIdempotencyKey(form.scheduleId, form.scheduledFor);
+    if (occurrence) {
+      idempotencyKey = occurrence.idempotencyKey;
     } else {
-      idempotencyKey = buildAdhocIntakeIdempotencyKey(form.productId, recordedAt);
+      idempotencyKey = buildAdhocIntakeIdempotencyKey(form.productId, recordedAt, adhocRetryCount);
     }
 
     let consumeQuantity: number | undefined;
@@ -244,7 +261,7 @@ export function IntakeForm({
       consumeQuantity = Number(form.consumeQuantity);
     }
 
-    onSubmit({
+    await onSubmit({
       productId: form.productId,
       idempotencyKey,
       recordedAt,
@@ -256,6 +273,23 @@ export function IntakeForm({
       consumeQuantity,
       note: form.note.trim() || null,
     });
+
+    if (occurrence) {
+      onSuccess?.();
+      return;
+    }
+
+    // 予定外の連続記録で同じ冪等キーが使い回されるのを防ぐため、
+    // 成功後は記録日時と retry カウンタを更新する。
+    setAdhocRetryCount((prev) => prev + 1);
+    setForm((prev) => ({
+      ...prev,
+      recordedAt: toDateTimeLocalValue(new Date()),
+      amount: selectedProduct.defaultAmount !== null ? String(selectedProduct.defaultAmount) : "",
+      consumeQuantity: "",
+      note: "",
+    }));
+    onSuccess?.();
   };
 
   return (

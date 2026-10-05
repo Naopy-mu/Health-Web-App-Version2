@@ -248,8 +248,49 @@ export function buildScheduledIntakeIdempotencyKey(
   return `${scheduleId}:${scheduledFor}`;
 }
 
-export function buildAdhocIntakeIdempotencyKey(productId: string, recordedAt: string): string {
-  return `adhoc:${productId}:${recordedAt}`;
+export function buildAdhocIntakeIdempotencyKey(
+  productId: string,
+  recordedAt: string,
+  retryCount?: number,
+): string {
+  const base = `adhoc:${productId}:${recordedAt}`;
+  if (retryCount === undefined || retryCount <= 0) {
+    return base;
+  }
+  return `${base}:retry${retryCount}`;
+}
+
+/**
+ * 取り消し・スキップ後の録り直し用に、既存の服用記録から次の冪等キーを作る。
+ * docs/api/supplements.md 5.4 節の `:retryN` ルールに従う。
+ */
+export function buildRetryIntakeIdempotencyKey(
+  baseKey: string,
+  intakes: SupplementIntake[],
+): string {
+  const retryPattern = new RegExp(
+    `^${baseKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(:retry(\\d+))?$`,
+  );
+  let maxRetry = -1;
+  let hasBase = false;
+  for (const intake of intakes) {
+    const match = retryPattern.exec(intake.idempotencyKey);
+    if (!match) {
+      continue;
+    }
+    if (match[1] === undefined) {
+      hasBase = true;
+      continue;
+    }
+    const n = Number(match[2]);
+    if (n > maxRetry) {
+      maxRetry = n;
+    }
+  }
+  if (!hasBase) {
+    return baseKey;
+  }
+  return `${baseKey}:retry${maxRetry + 1}`;
 }
 
 export function findIntakeForOccurrence(

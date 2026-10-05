@@ -131,4 +131,56 @@ describe("IntakeForm", () => {
     await waitFor(() => expect(screen.getByText(/単位が商品の既定単位/)).toBeInTheDocument());
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  it("商品が1件だけでも、選択操作なしで送信できる", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IntakeForm
+        products={[PRODUCT]}
+        lots={LOTS}
+        onSubmit={onSubmit}
+        disabled={false}
+        serverError={null}
+      />,
+    );
+
+    const productSelect = screen.getByLabelText("商品") as HTMLSelectElement;
+    await waitFor(() => expect(productSelect.value).toBe(PRODUCT.id));
+
+    fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const args = onSubmit.mock.calls[0][0];
+    expect(args.productId).toBe(PRODUCT.id);
+    expect(args.unit).toBe(PRODUCT.defaultUnit);
+    expect(args.amount).toBe(PRODUCT.defaultAmount);
+    expect(args.idempotencyKey).toMatch(/^adhoc:/);
+  });
+
+  it("連続して記録すると冪等キーが変わる", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IntakeForm
+        products={[PRODUCT]}
+        lots={LOTS}
+        onSubmit={onSubmit}
+        disabled={false}
+        serverError={null}
+      />,
+    );
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("商品") as HTMLSelectElement).value).toBe(PRODUCT.id),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const firstKey = onSubmit.mock.calls[0][0].idempotencyKey;
+
+    fireEvent.click(screen.getByRole("button", { name: "記録する" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    const secondKey = onSubmit.mock.calls[1][0].idempotencyKey;
+
+    expect(secondKey).not.toBe(firstKey);
+  });
 });

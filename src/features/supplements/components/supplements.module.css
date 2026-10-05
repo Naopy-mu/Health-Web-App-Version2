@@ -199,6 +199,12 @@
   border: 1px solid var(--error);
 }
 
+.buttonSmall {
+  padding: 0.25rem 0.75rem;
+  font-size: 0.875rem;
+  min-height: 32px;
+}
+
 .buttonGroup {
   display: flex;
   flex-wrap: wrap;

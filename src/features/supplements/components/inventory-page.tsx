@@ -15,6 +15,7 @@ import styles from "./supplements.module.css";
 export function InventoryPage() {
   const [editingLot, setEditingLot] = useState<SupplementLot | null>(null);
   const [intakeError, setIntakeError] = useState<string | null>(null);
+  const [intakeInfo, setIntakeInfo] = useState<string | null>(null);
   const conflictRef = useRef<HTMLDivElement>(null);
   const lotMutationIdRef = useRef<string | null>(null);
 
@@ -114,16 +115,20 @@ export function InventoryPage() {
       note: string | null;
     }) => {
       setIntakeError(null);
+      setIntakeInfo(null);
       const request = {
         resource: "intake" as const,
         clientMutationId: generateUuid(),
         intake: input,
       };
-      const ok = await recordIntake(request);
-      if (!ok) {
-        setIntakeError(error);
+      const result = await recordIntake(request);
+      if (!result.ok) {
+        setIntakeError(result.error ?? error ?? "記録に失敗しました。");
+        return;
       }
-      return ok;
+      if (result.outcome === "idempotent_replay") {
+        setIntakeInfo("同じ記録が既に存在するため、在庫・履歴は追加されていません。");
+      }
     },
     [recordIntake, error],
   );
@@ -153,6 +158,11 @@ export function InventoryPage() {
         {intakeError ? (
           <p className={`${styles.status} ${styles.statusError}`} role="alert">
             {intakeError}
+          </p>
+        ) : null}
+        {intakeInfo ? (
+          <p className={`${styles.status} ${styles.statusInfo}`} role="status">
+            {intakeInfo}
           </p>
         ) : null}
         {isLoading && !isSubmitting ? (

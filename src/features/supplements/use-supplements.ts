@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
   DeleteSupplementRequest,
+  IntakeOutcome,
   SaveSupplementRequest,
   SupplementIntake,
   SupplementListQuery,
@@ -258,8 +259,9 @@ export function useSupplements<T extends SupplementEntry>(resource: SupplementLi
         if (refetchOutcome?.kind === "found") {
           const entry = refetchOutcome.entry as SupplementLot;
           target = { kind: "lot", data: entry };
-          const updated = refreshRowVersion(options.editingLot, entry);
-          options.setEditingLot?.(updated);
+          // 在庫ロットは残量が他の操作（服用記録など）で変化していることがある。
+          // 409 後は最新の残量を反映するため、編集中の行を最新エントリで丸ごと更新する。
+          options.setEditingLot?.(entry);
         } else if (refetchOutcome?.kind === "deleted") {
           options.setEditingLot?.(null);
         }
@@ -406,7 +408,9 @@ export function useSupplements<T extends SupplementEntry>(resource: SupplementLi
   );
 
   const recordIntake = useCallback(
-    async (request: Extract<SaveSupplementRequest, { resource: "intake" }>): Promise<boolean> => {
+    async (
+      request: Extract<SaveSupplementRequest, { resource: "intake" }>,
+    ): Promise<{ ok: boolean; outcome?: IntakeOutcome; error?: string }> => {
       setLoadingState("submitting");
       setError(null);
       setConflict(null);
@@ -415,16 +419,16 @@ export function useSupplements<T extends SupplementEntry>(resource: SupplementLi
       if (!result.ok) {
         if (result.status === 401) {
           window.location.href = `/auth?next=/supplements`;
-          return false;
+          return { ok: false };
         }
         setError(result.error.message);
         setLoadingState("idle");
-        return false;
+        return { ok: false, error: result.error.message };
       }
 
       await load();
       setLoadingState("idle");
-      return true;
+      return { ok: true, outcome: result.data.outcome as IntakeOutcome };
     },
     [load],
   );

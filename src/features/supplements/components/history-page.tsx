@@ -37,8 +37,8 @@ export function HistoryPage() {
 
   const handleVoid = useCallback(
     async (intake: SupplementIntake) => {
-      const reason = window.prompt("取消理由（任意）") ?? "";
-      if (reason === null) {
+      const rawReason = window.prompt("取消理由（任意）");
+      if (rawReason === null) {
         return;
       }
       setFormError(null);
@@ -48,7 +48,7 @@ export function HistoryPage() {
         void: {
           id: intake.id,
           expectedRowVersion: intake.rowVersion,
-          reason: reason.trim() || null,
+          reason: rawReason.trim() || null,
         },
       };
       const ok = await voidIntake(request, { editingIntake: intake, setEditingIntake: undefined });

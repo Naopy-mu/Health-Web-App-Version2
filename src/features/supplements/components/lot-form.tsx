@@ -74,6 +74,7 @@ export function LotForm({
     emptyForm(products.find((p) => p.archivedAt === null)?.id ?? ""),
   );
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof LotFormData, string>>>({});
+  const [remainingQuantityTouched, setRemainingQuantityTouched] = useState(false);
 
   const productId = useId();
   const lotCodeId = useId();
@@ -84,24 +85,37 @@ export function LotForm({
   const expiresOnId = useId();
   const noteId = useId();
 
-  const previousEditingId = useRef<string | null>(null);
+  const previousEditingKey = useRef<string | null>(null);
 
   const selectedProduct = products.find((p) => p.id === form.productId);
   const isArchived = selectedProduct?.archivedAt !== null;
 
   useEffect(() => {
-    const editingId = editingLot?.id ?? null;
-    if (editingId === previousEditingId.current) {
+    const editingKey = editingLot ? `${editingLot.id}:${editingLot.rowVersion}` : null;
+    if (editingKey === previousEditingKey.current) {
       return;
     }
-    previousEditingId.current = editingId;
+    previousEditingKey.current = editingKey;
+    setRemainingQuantityTouched(false);
     setForm(editingLot ? entryToForm(editingLot) : emptyForm(products[0]?.id ?? ""));
     setFieldErrors({});
   }, [editingLot, products]);
 
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!form.productId && products.length > 0) {
+      const firstActive = products.find((p) => p.archivedAt === null);
+      setForm((prev) => ({ ...prev, productId: firstActive?.id ?? products[0]?.id ?? "" }));
+    }
+  }, [products, form.productId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   const handleChange = (field: keyof LotFormData, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+    if (field === "remainingQuantity") {
+      setRemainingQuantityTouched(true);
+    }
   };
 
   const parseOptionalNumber = (value: string): number | null => {
@@ -162,7 +176,7 @@ export function LotForm({
       productId: form.productId,
       lotCode: form.lotCode.trim() || null,
       quantity: Number(form.quantity),
-      ...(form.remainingQuantity.trim() !== ""
+      ...(remainingQuantityTouched && form.remainingQuantity.trim() !== ""
         ? { remainingQuantity: Number(form.remainingQuantity) }
         : {}),
       purchasedOn: form.purchasedOn || null,

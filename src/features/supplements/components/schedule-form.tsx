@@ -120,9 +120,39 @@ export function ScheduleForm({
       return;
     }
     previousEditingId.current = editingId;
-    setForm(editingSchedule ? entryToForm(editingSchedule) : emptyForm(products[0]?.id ?? ""));
+    const defaultProductId =
+      products.find((p) => p.archivedAt === null)?.id ?? products[0]?.id ?? "";
+    setForm(editingSchedule ? entryToForm(editingSchedule) : emptyForm(defaultProductId));
     setFieldErrors({});
   }, [editingSchedule, products]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (form.productId || products.length === 0) {
+      return;
+    }
+    const firstActive = products.find((p) => p.archivedAt === null);
+    setForm((prev) => ({
+      ...prev,
+      productId: firstActive?.id ?? products[0]?.id ?? "",
+      unit: firstActive?.defaultUnit ?? prev.unit,
+    }));
+  }, [products, form.productId]);
+
+  useEffect(() => {
+    if (editingSchedule || !selectedProduct) {
+      return;
+    }
+    setForm((prev) => ({
+      ...prev,
+      unit: selectedProduct.defaultUnit,
+      amount:
+        prev.amount === "" && selectedProduct.defaultAmount !== null
+          ? String(selectedProduct.defaultAmount)
+          : prev.amount,
+    }));
+  }, [selectedProduct, editingSchedule]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleChange = (field: keyof ScheduleFormData, value: string | number[] | boolean) => {
     setForm((prev) => ({ ...prev, [field]: value }));

@@ -84,16 +84,38 @@ export function ProductPage() {
 
   const handleArchiveToggle = useCallback(
     async (product: SupplementProduct, archived: boolean) => {
+      const {
+        id,
+        rowVersion,
+        name,
+        brand,
+        category,
+        form,
+        defaultAmount,
+        defaultUnit,
+        amountPerContainer,
+        lowStockThreshold,
+        ingredientNote,
+        safetyNote,
+        url,
+      } = product;
       const request = {
         resource: "product" as const,
         clientMutationId: generateUuid(),
         product: {
-          id: product.id,
-          expectedRowVersion: product.rowVersion,
-          name: product.name,
-          category: product.category,
-          form: product.form,
-          defaultUnit: product.defaultUnit,
+          id,
+          expectedRowVersion: rowVersion,
+          name,
+          brand,
+          category,
+          form,
+          defaultAmount,
+          defaultUnit,
+          amountPerContainer,
+          lowStockThreshold,
+          ingredientNote,
+          safetyNote,
+          url,
           archived,
         },
       };
